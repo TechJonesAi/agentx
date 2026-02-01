@@ -1,0 +1,105 @@
+agent:
+  name: AgentX
+  defaultProvider: anthropic
+  model: claude-sonnet-4-20250514
+
+providers:
+  anthropic:
+    model: claude-sonnet-4-20250514
+    maxTokens: 4096
+  openai:
+    model: gpt-4o
+    maxTokens: 4096
+  ollama:
+    model: llama3
+    baseUrl: http://localhost:11434
+
+memory:
+  maxConversationHistory: 100
+  summarizeAfter: 50
+  embeddingProvider: local
+
+sessions:
+  persistToDisk: true
+  ttlMinutes: 1440
+  dmScope: main                    # main | per-peer | per-channel-peer | per-account-channel-peer
+  mainKey: main
+  identityLinks: {}                # Canonical name → platform IDs mapping
+  reset:
+    mode: idle
+    idleMinutes: 120               # Reset after 2 hours idle
+  resetByType:
+    dm:
+      mode: idle
+      idleMinutes: 240             # DMs reset after 4 hours idle
+    group:
+      mode: idle
+      idleMinutes: 120
+    thread:
+      mode: daily
+      atHour: 4                    # Threads reset at 4 AM
+  resetTriggers:
+    - /new
+    - /reset
+  sendPolicy:
+    rules: []
+    default: allow
+  pruning:
+    enabled: true
+    maxToolResultAge: 30           # Minutes before tool results are pruned
+    keepLastNToolResults: 5
+  compaction:
+    enabled: true
+    threshold: 0.8                 # Compact at 80% context usage
+    autoFlushMemory: true
+
+skills:
+  directory: ~/.agentx/skills
+  autoReload: true
+
+browser:
+  headless: true
+  timeout: 30000
+
+voice:
+  ttsProvider: elevenlabs
+  sttProvider: whisper
+  whisperModel: base
+  twilio:
+    accountSid: ""                     # TWILIO_ACCOUNT_SID env var
+    authToken: ""                      # TWILIO_AUTH_TOKEN env var
+    phoneNumber: ""                    # TWILIO_PHONE_NUMBER env var
+    webhookBaseUrl: ""                 # Public URL for Twilio callbacks
+
+google:
+  clientId: ""                         # GOOGLE_CLIENT_ID env var
+  clientSecret: ""                     # GOOGLE_CLIENT_SECRET env var
+  redirectUri: http://localhost:3000/auth/google/callback
+  scopes:
+    - https://www.googleapis.com/auth/gmail.modify
+    - https://www.googleapis.com/auth/calendar
+
+obsidian:
+  vaultPath: ""                        # Path to Obsidian vault
+  dailyNotesFolder: daily
+  dailyNoteFormat: "YYYY-MM-DD"
+
+web:
+  enabled: false
+  port: 3001
+  host: "0.0.0.0"
+  authToken: ""                        # Set a token to require Authorization header
+
+scheduler:
+  enabled: false
+  heartbeatIntervalMinutes: 60
+
+security:
+  sandboxShell: false
+  shellPermissionLevel: ask-confirm  # unrestricted | ask-confirm | allowlist-only | disabled
+  maxShellTimeout: 30000
+  encryptStorage: false              # Enable AES-256-GCM encryption for sensitive DB columns
+  auditLog: true                     # Log all agent actions to audit_log table
+  auditRetentionDays: 90             # Auto-purge audit entries older than this
+  localAuth: false                   # Require PIN/password to use agent
+  autoLockMinutes: 30                # Auto-lock after inactivity (0 = disabled)

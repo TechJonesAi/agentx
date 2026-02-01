@@ -1,0 +1,8 @@
+{
+  "name": "monitor-website",
+  "version": "0.1.0",
+  "description": "Monitor a website for availability or content changes",
+  "triggers": ["monitor", "watch", "check website", "uptime"],
+  "permissions": ["network", "scheduler"],
+  "author": "AgentX"
+}

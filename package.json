@@ -1,0 +1,27 @@
+{
+  "name": "agentx",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Cross-platform AI agent with chat integrations, browser automation, and extensible skills",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "pnpm -r lint",
+    "clean": "pnpm -r clean",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:unit": "vitest run packages/core/tests/unit",
+    "test:integration": "vitest run packages/core/tests/integration",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "vitest": "^4.0.18"
+  }
+}

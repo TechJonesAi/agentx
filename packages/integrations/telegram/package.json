@@ -1,0 +1,22 @@
+{
+  "name": "@agentx/telegram",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Telegram integration for AgentX",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentx/core": "workspace:*",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}

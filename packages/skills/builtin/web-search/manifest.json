@@ -1,0 +1,8 @@
+{
+  "name": "web-search",
+  "version": "0.1.0",
+  "description": "Search the web using DuckDuckGo",
+  "triggers": ["search", "find", "look up", "google"],
+  "permissions": ["network"],
+  "author": "AgentX"
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+*.db
+*.db-journal
+*.log
+*.sqlite
+*.sqlite3
+.DS_Store
+coverage/
+.turbo/
+tmp/
+~/.agentx/

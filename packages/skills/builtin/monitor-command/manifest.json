@@ -1,0 +1,8 @@
+{
+  "name": "monitor-command",
+  "version": "0.1.0",
+  "description": "Run shell commands periodically and alert based on output",
+  "triggers": ["monitor command", "watch command", "run periodically"],
+  "permissions": ["shell", "scheduler"],
+  "author": "AgentX"
+}

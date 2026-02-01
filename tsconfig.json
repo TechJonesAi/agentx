@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/cli" },
+    { "path": "./packages/browser" },
+    { "path": "./packages/skills" },
+    { "path": "./packages/voice" },
+    { "path": "./packages/web" },
+    { "path": "./packages/app" }
+  ],
+  "include": [],
+  "exclude": ["node_modules"]
+}

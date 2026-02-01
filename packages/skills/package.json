@@ -1,0 +1,23 @@
+{
+  "name": "@agentx/skills",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Plugin system and built-in skills for AgentX",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentx/core": "workspace:*",
+    "chokidar": "^4.0.3",
+    "eventemitter3": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}

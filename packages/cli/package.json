@@ -1,0 +1,28 @@
+{
+  "name": "@agentx/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AgentX command-line interface",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "agentx": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentx/core": "workspace:*",
+    "commander": "^13.0.0",
+    "inquirer": "^12.3.0",
+    "chalk": "^5.4.1",
+    "ora": "^8.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}

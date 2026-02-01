@@ -1,0 +1,8 @@
+{
+  "name": "monitor-file",
+  "version": "0.1.0",
+  "description": "Watch files and directories for changes",
+  "triggers": ["watch file", "monitor file", "file change"],
+  "permissions": ["filesystem.read"],
+  "author": "AgentX"
+}
