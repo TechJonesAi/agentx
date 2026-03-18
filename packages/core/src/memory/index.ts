@@ -1,3 +1,33 @@
-export { createDatabase } from './database.js';
+export { createDatabase, isFtsAvailable } from './database.js';
 export { ConversationMemory } from './conversation.js';
 export { LongTermMemoryStore } from './longterm.js';
+export { OllamaEmbeddings, cosineSimilarity, searchSimilar, type EmbeddingProvider } from './embeddings.js';
+export { MemoryService } from './memory-service.js';
+export type { UserPreference, UserFact, SessionSummary, MemoryStatus, ScoredMemory } from './memory-service.js';
+export { NoopMemoryIndex } from './memory-index.js';
+export type { MemoryIndex, MemoryIndexEntry, MemorySearchResult } from './memory-index.js';
+export { probeFts5, createCapabilities } from './capabilities.js';
+export type { MemoryCapabilities } from './capabilities.js';
+export { buildInjectedContext } from './injection.js';
+export type { InjectableMemory, InjectableChunk, InjectionCaps, InjectedContext } from './injection.js';
+export { buildWebQuery, isTimeSensitiveQuery } from './web-query.js';
+export { AuditDedupe } from './audit-dedupe.js';
+export { runMemoryMigrations } from './migrations.js';
+export { MemoryAuditService } from './memory-audit.js';
+export type { AuditEvent, AuditFilter, AuditActor } from './memory-audit.js';
+export { DocIngestService, chunkText } from './doc-ingest.js';
+export type { IngestDocOptions, IngestResult, KnowledgeDoc, KnowledgeChunk, SourceType } from './doc-ingest.js';
+export { EmbeddingService } from './embedding-service.js';
+export type { StoredEmbedding, VectorSearchResult } from './embedding-service.js';
+export { KnowledgeRetrievalService } from './knowledge-retrieval.js';
+export type { RetrievalResult, RetrievalOptions } from './knowledge-retrieval.js';
+export { WebResearchService } from './web-research.js';
+export type { WebResearchResult, WebSearchProvider } from './web-research.js';
+
+// Cognitive Memory System exports
+export { CognitiveMemorySystem } from './cognitive-memory-system.js';
+export { DocumentRegistry } from './document-registry.js';
+export { DocumentChunker } from './chunker.js';
+export { FtsIndexService } from './fts-index-service.js';
+export { LearningService } from './learning-service.js';
+export type { DocumentMetadata, DocumentPage, DocumentChunk, Entity, EntityMention, RetrievalResult, RetrievalLog } from './types.js';
