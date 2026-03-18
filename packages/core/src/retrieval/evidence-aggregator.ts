@@ -68,8 +68,7 @@ export class EvidenceAggregator {
     for (const result of results) {
       if (totalChars >= maxChars) break;
 
-      const docLine = result.document?.title || result.document?.file_name || result.document_id;
-      const line = `[${result.rank}] ${docLine}`;
+      const line = `[${result.rank}] ${result.document_id}`;
 
       if (totalChars + line.length + 1 <= maxChars) {
         compressed.push(line);

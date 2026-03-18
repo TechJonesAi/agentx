@@ -60,8 +60,8 @@ export class RetrievalService {
         session_id: options.sessionId,
         result_count: results.length,
         execution_ms: executionMs,
-        ranked_correctly: 0,
-        feedback_provided: 0,
+        ranked_correctly: false,
+        feedback_provided: false,
         created_at: Date.now(),
       }, results);
 
@@ -126,7 +126,6 @@ export class RetrievalService {
           score: 1.0,
           score_type: 'exact_match',
           matched_field: 'full_text',
-          document: doc,
           created_at: Date.now(),
         });
       }
@@ -151,7 +150,6 @@ export class RetrievalService {
           rank: rank + 1,
           score: Math.abs(ftsResult.rank),
           score_type: 'fts_match',
-          document: doc,
           created_at: Date.now(),
         });
       }
@@ -180,7 +178,6 @@ export class RetrievalService {
           rank: rank + 1,
           score: Math.abs(ftsResult.rank),
           score_type: 'semantic_match',
-          document: doc,
           created_at: Date.now(),
         });
       }
@@ -205,7 +202,6 @@ export class RetrievalService {
           rank: rank + 1,
           score: Math.abs(ftsResult.rank),
           score_type: 'analytical_match',
-          document: doc,
           created_at: Date.now(),
         });
       }
