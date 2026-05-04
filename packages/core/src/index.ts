@@ -72,6 +72,17 @@ export type { ShutdownHandler } from './shutdown.js';
 // Logger
 export { logger, createLogger } from './logger.js';
 
+// Reasoning / Decision Engine (P8-1)
+export { DecisionEngine, isUtilityQuery, isDocumentReferenceQuery } from './reasoning/decision-engine.js';
+export type {
+  DecisionEngineInput, DecisionEngineResult, DecisionDomain,
+  DecisionStrategy, DecisionKnowledgeContext, DecisionAdvisorInput,
+  DecisionRedFlagInput, DecisionValidationInput, DecisionValidationResult,
+  AlignmentStatus, DecisionSummary,
+  ClassificationSource, ExecutionTrace,
+  ValidationSummary,
+} from './reasoning/decision-engine.js';
+
 // Security
 export {
   CredentialManager, redactSecrets,
