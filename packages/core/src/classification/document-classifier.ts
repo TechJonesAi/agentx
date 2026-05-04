@@ -150,6 +150,7 @@ export class DocumentClassifier {
     return {
       label: bestLabel,
       confidence: Math.min(maxScore, 1.0),
+      method: 'pattern',
     };
   }
 

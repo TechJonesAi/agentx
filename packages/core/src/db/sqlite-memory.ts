@@ -55,7 +55,7 @@ export class SqliteMemoryDb {
     return transaction(this.db);
   }
 
-  prepare<T extends Database.RunResult | Database.ParamsObject[]>(
+  prepare<T extends unknown[] = unknown[]>(
     sql: string,
   ): Database.Statement<T> {
     return this.db.prepare(sql) as Database.Statement<T>;

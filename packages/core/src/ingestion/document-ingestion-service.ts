@@ -148,7 +148,7 @@ export class DocumentIngestionService {
 
         return {
           documentId: final.document_id,
-          status: 'success',
+          status: 'success' as const,
           metadata: final,
           pageCount: pages.length,
           chunkCount: chunks.length,

@@ -34,10 +34,11 @@ export class LanceDbVectorService extends VectorIndexService {
   private table: any;
   private initialized = false;
 
-  constructor(private dataDir: string) {}
+  constructor(private dataDir: string) { super(); }
 
   async initialize(): Promise<void> {
     try {
+      // @ts-expect-error optional runtime dependency — not installed by default
       const lancedb = await import('lancedb');
       this.db = await lancedb.connect(this.dataDir);
       this.initialized = true;
@@ -119,10 +120,11 @@ export class FaissVectorService extends VectorIndexService {
   private nextId = 0;
   private initialized = false;
 
-  constructor(private dimension: number = 768) {}
+  constructor(private dimension: number = 768) { super(); }
 
   async initialize(): Promise<void> {
     try {
+      // @ts-expect-error optional runtime dependency — not installed by default
       const faiss = await import('faiss-node');
       this.index = new faiss.IndexFlatL2(this.dimension);
       this.initialized = true;

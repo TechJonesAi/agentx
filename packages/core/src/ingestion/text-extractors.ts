@@ -39,7 +39,8 @@ export class PdfExtractor extends TextExtractor {
 
   async extract(filePath: string): Promise<ExtractedContent> {
     try {
-      const pdfParse = (await import('pdf-parse')).default;
+      const pdfParseModule = await import('pdf-parse');
+      const pdfParse = (pdfParseModule as any).default ?? (pdfParseModule as any).pdfParse ?? pdfParseModule;
       const fs = await import('node:fs/promises');
       const pdfData = await fs.readFile(filePath);
       const pdf = await pdfParse(pdfData);
