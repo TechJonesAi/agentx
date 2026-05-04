@@ -193,6 +193,72 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // ─── Dashboard stubs (shapes must match frontend destructuring) ─
+        if (route === '/api/projects' && method === 'GET') {
+          sendJson(res, 200, {
+            activeProjects: 0, completedProjects: 0, totalProjects: 0,
+            pendingTasks: 0, openIssues: 0, averageHealth: 0,
+          });
+          return;
+        }
+
+        if (route === '/api/tools' && method === 'GET') {
+          // frontend expects a bare array
+          const tools = agent.getToolRegistry().getDefinitions();
+          sendJson(res, 200, tools.map((t) => ({
+            name: t.name, enabled: true, category: 'Built-in',
+          })));
+          return;
+        }
+
+        if (route === '/api/build-memory/stats' && method === 'GET') {
+          sendJson(res, 200, {
+            recordedBuilds: 0, successfulPatterns: 0,
+            failedPatterns: 0, enabled: false,
+          });
+          return;
+        }
+
+        if (route === '/api/builder/stats' && method === 'GET') {
+          sendJson(res, 200, {
+            totalBuilds: 0, successfulBuilds: 0, successRate: 0,
+            lastBuildTime: 0,
+            platformBreakdown: {
+              ios: { total: 0, successful: 0 },
+              web: { total: 0, successful: 0 },
+            },
+          });
+          return;
+        }
+
+        if (route === '/api/workflows' && method === 'GET') {
+          sendJson(res, 200, {
+            totalWorkflows: 0, activeWorkflows: 0, completedWorkflows: 0,
+            failedWorkflows: 0, averageExecutionTime: 0, successRate: 0,
+          });
+          return;
+        }
+
+        if (route === '/api/logs' && method === 'GET') {
+          sendJson(res, 200, []);
+          return;
+        }
+
+        if (route === '/api/cognitive/status' && method === 'GET') {
+          sendJson(res, 200, { running: false, jobs: [] });
+          return;
+        }
+
+        if (route === '/api/memory/gateway/health' && method === 'GET') {
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        if (route === '/api/memory/gateway/documents' && method === 'GET') {
+          sendJson(res, 200, { documents: [] });
+          return;
+        }
+
         // ─── Skills ─────────────────────────────────────────────────────
         if (route === '/api/skills' && method === 'GET') {
           const tools = agent.getToolRegistry().getDefinitions();
