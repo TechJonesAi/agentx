@@ -2,6 +2,9 @@ agent:
   name: AgentX
   defaultProvider: anthropic
   model: claude-sonnet-4-20250514
+  intelligence:
+    enabled: false
+    observationOnly: true
 
 providers:
   anthropic:

@@ -32,6 +32,11 @@ import { ContextManager } from './context-manager.js';
 import { retryWithBackoff, CircuitBreaker } from './resilience.js';
 import { RateLimiter } from './rate-limiter.js';
 import { HealthServer, type HealthStats } from './health.js';
+import { IntentClassifier } from './reasoning/intent-classifier.js';
+import { DomainClassifier } from './reasoning/domain-classifier.js';
+import { KnowledgeProbe } from './reasoning/knowledge-probe.js';
+import { detectRedFlag, type RedFlagResult } from './reasoning/redflag-gate.js';
+import { DecisionEngine, type DecisionEngineInput, type DecisionSummary, type ExecutionTrace } from './reasoning/decision-engine.js';
 
 const log = createLogger('agent');
 
@@ -77,6 +82,16 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   // Abort controllers per session for /stop support
   private sessionAbortControllers = new Map<string, AbortController>();
+
+  // Phase 4: Intelligence observation (Decision Engine wiring, observation-only)
+  private _intelligenceEnabled = false;
+  private _intentClassifier: IntentClassifier | null = null;
+  private _domainClassifier: DomainClassifier | null = null;
+  private _knowledgeProbe: KnowledgeProbe | null = null;
+  private _decisionEngine: DecisionEngine | null = null;
+  private _lastDecisionSummary: DecisionSummary | null = null;
+  private _lastExecutionTrace: ExecutionTrace | null = null;
+  private _lastRedFlag: RedFlagResult | null = null;
 
   constructor(configPath?: string) {
     super();
@@ -209,8 +224,44 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       });
     }
 
+    // Phase 4: Initialize intelligence observation if enabled
+    const intel = this.config.agent.intelligence;
+    if (intel?.enabled) {
+      if (!intel.observationOnly) {
+        throw new Error('Decision Engine non-observational mode requires retrieval / advisor / safety subsystems that are not yet present on main');
+      }
+      this._intelligenceEnabled = true;
+      this._intentClassifier = new IntentClassifier();
+      this._domainClassifier = new DomainClassifier();
+      this._knowledgeProbe = new KnowledgeProbe();
+      this._decisionEngine = new DecisionEngine();
+    }
+
     log.info({ provider: this.config.agent.defaultProvider }, 'Agent initialized');
   }
+
+  // Phase 4: observation-only orchestration. Pure side-effect on private fields.
+  private _runIntelligenceObservation(input: string): void {
+    if (!this._intelligenceEnabled || !this._decisionEngine || !this._intentClassifier || !this._domainClassifier || !this._knowledgeProbe) return;
+    const redFlag = detectRedFlag(input);
+    const detectedDomain = this._domainClassifier.classify(input);
+    const queryIntent = this._intentClassifier.classify(input);
+    const knowledge = this._knowledgeProbe.probe(input);
+    const decisionInput: DecisionEngineInput = {
+      query: input,
+      knowledgeCtx: { ...knowledge, detectedDomain, queryIntent },
+      advisorDecision: { detectedDomain, knowledgeConfidence: 'none', toolsRecommended: true },
+      redFlagGate: { triggered: redFlag.isRedFlag, isHardGate: false },
+    };
+    const decision = this._decisionEngine.decide(decisionInput);
+    this._lastDecisionSummary = DecisionEngine.summarize(decision, detectedDomain, decisionInput);
+    this._lastExecutionTrace = DecisionEngine.buildExecutionTrace(decision, decisionInput);
+    this._lastRedFlag = redFlag;
+  }
+
+  getLastDecisionSummary(): DecisionSummary | null { return this._lastDecisionSummary; }
+  getLastExecutionTrace(): ExecutionTrace | null { return this._lastExecutionTrace; }
+  getLastRedFlag(): RedFlagResult | null { return this._lastRedFlag; }
 
   private registerBuiltinTools(): void {
     for (const tool of getBuiltinTools()) {
@@ -523,6 +574,8 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
     const toolDefs = this.toolRegistry.getDefinitions();
 
+    this._runIntelligenceObservation(input);
+
     let response: LLMResponse;
     try {
       response = await this.completeWithResilience({
@@ -708,6 +761,8 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     const contextResult = await this.contextManager.prepareContext(session.id, allMessages);
     const messages = contextResult.messages;
     const toolDefs = this.toolRegistry.getDefinitions();
+
+    this._runIntelligenceObservation(input);
 
     // First response: stream it
     let response: LLMResponse;

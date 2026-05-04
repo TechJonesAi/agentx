@@ -230,6 +230,10 @@ export interface AgentConfig {
     name: string;
     defaultProvider: LLMProvider;
     model: string;
+    intelligence?: {
+      enabled: boolean;
+      observationOnly: boolean;
+    };
   };
   providers: {
     anthropic?: { model: string; maxTokens: number };
