@@ -72,6 +72,14 @@ export type { ShutdownHandler } from './shutdown.js';
 // Logger
 export { logger, createLogger } from './logger.js';
 
+// Reasoning Service + Internet Search
+export { ReasoningService } from './reasoning/reasoning-service.js';
+export type {
+  ReasoningInput, ReasoningOutput, ReasoningDiagnostics,
+  ConfidenceLevel, InternetResult, InternetSearchProvider,
+} from './reasoning/reasoning-service.js';
+export { DuckDuckGoSearchProvider } from './reasoning/web-search-provider.js';
+
 // Reasoning / Decision Engine (P8-1)
 export { DecisionEngine, isUtilityQuery, isDocumentReferenceQuery } from './reasoning/decision-engine.js';
 export type {
