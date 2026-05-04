@@ -22,7 +22,9 @@
     "eventemitter3": "^5.0.1",
     "node-cron": "^3.0.3",
     "keytar": "^7.9.0",
-    "pino": "^9.6.0"
+    "pino": "^9.6.0",
+    "pdf-parse": "^2.4.5",
+    "mammoth": "^1.12.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
