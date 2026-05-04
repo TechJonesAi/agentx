@@ -15,13 +15,17 @@ import { Agent } from '../../src/agent.js';
 interface IntelOpts {
   enabled?: boolean;
   observationOnly?: boolean;
+  influenceMode?: 'off' | 'force-reasoning' | string;
   omit?: boolean;
 }
 
 function writeConfig(dir: string, opts: IntelOpts = {}): string {
+  const influenceLine = opts.influenceMode !== undefined
+    ? `    influenceMode: ${opts.influenceMode}\n`
+    : '';
   const intelBlock = opts.omit
     ? ''
-    : `  intelligence:\n    enabled: ${opts.enabled ?? false}\n    observationOnly: ${opts.observationOnly ?? true}\n`;
+    : `  intelligence:\n    enabled: ${opts.enabled ?? false}\n    observationOnly: ${opts.observationOnly ?? true}\n${influenceLine}`;
   const yaml = [
     'agent:',
     '  name: AgentX-Test',
@@ -96,9 +100,11 @@ describe('Agent — intelligence observation (Phase 4)', () => {
     await a.shutdown?.();
   });
 
-  it('T4: enabled=true, observationOnly=false — constructor throws precondition error', () => {
-    expect(() => buildAgent({ enabled: true, observationOnly: false }))
-      .toThrow(/non-observational/i);
+  it('T4: enabled=true, observationOnly=false, unsupported influenceMode — constructor throws', () => {
+    // Phase 5 relaxed the Phase 4 throw: observationOnly=false now allowed when
+    // influenceMode is 'off' or 'force-reasoning'. Any other mode still throws.
+    expect(() => buildAgent({ enabled: true, observationOnly: false, influenceMode: 'all' as never }))
+      .toThrow(/influenceMode/i);
   });
 
   it('T5: enabled=true, observationOnly=true — getters return null BEFORE first invocation', async () => {

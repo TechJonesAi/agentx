@@ -5,6 +5,7 @@ agent:
   intelligence:
     enabled: false
     observationOnly: true
+    influenceMode: off
 
 providers:
   anthropic:

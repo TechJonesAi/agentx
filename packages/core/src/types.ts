@@ -46,6 +46,7 @@ export interface LLMRequestOptions {
   maxTokens?: number;
   temperature?: number;
   stream?: boolean;
+  capability?: 'reasoning';
 }
 
 export interface StreamCallbacks {
@@ -233,6 +234,7 @@ export interface AgentConfig {
     intelligence?: {
       enabled: boolean;
       observationOnly: boolean;
+      influenceMode?: 'off' | 'force-reasoning';
     };
   };
   providers: {

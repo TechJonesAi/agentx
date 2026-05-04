@@ -85,6 +85,8 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   // Phase 4: Intelligence observation (Decision Engine wiring, observation-only)
   private _intelligenceEnabled = false;
+  private _intelligenceObservationOnly = true;
+  private _intelligenceInfluenceMode: 'off' | 'force-reasoning' = 'off';
   private _intentClassifier: IntentClassifier | null = null;
   private _domainClassifier: DomainClassifier | null = null;
   private _knowledgeProbe: KnowledgeProbe | null = null;
@@ -92,6 +94,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _lastDecisionSummary: DecisionSummary | null = null;
   private _lastExecutionTrace: ExecutionTrace | null = null;
   private _lastRedFlag: RedFlagResult | null = null;
+  private _lastForceReasoning = false;
 
   constructor(configPath?: string) {
     super();
@@ -224,13 +227,16 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       });
     }
 
-    // Phase 4: Initialize intelligence observation if enabled
+    // Phase 4/5: Initialize intelligence observation + optional influence
     const intel = this.config.agent.intelligence;
     if (intel?.enabled) {
-      if (!intel.observationOnly) {
-        throw new Error('Decision Engine non-observational mode requires retrieval / advisor / safety subsystems that are not yet present on main');
+      const mode = (intel.influenceMode ?? 'off') as 'off' | 'force-reasoning';
+      if (!intel.observationOnly && mode !== 'off' && mode !== 'force-reasoning') {
+        throw new Error(`Decision Engine influenceMode "${intel.influenceMode}" not supported. Allowed: off | force-reasoning`);
       }
       this._intelligenceEnabled = true;
+      this._intelligenceObservationOnly = intel.observationOnly;
+      this._intelligenceInfluenceMode = mode;
       this._intentClassifier = new IntentClassifier();
       this._domainClassifier = new DomainClassifier();
       this._knowledgeProbe = new KnowledgeProbe();
@@ -257,11 +263,21 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     this._lastDecisionSummary = DecisionEngine.summarize(decision, detectedDomain, decisionInput);
     this._lastExecutionTrace = DecisionEngine.buildExecutionTrace(decision, decisionInput);
     this._lastRedFlag = redFlag;
+    this._lastForceReasoning = decision.forceReasoning;
+  }
+
+  // Phase 5: emit a model-capability hint only when influence is fully opted in
+  private _resolveModelHint(): { capability: 'reasoning' } | null {
+    if (!this._intelligenceEnabled) return null;
+    if (this._intelligenceObservationOnly) return null;
+    if (this._intelligenceInfluenceMode !== 'force-reasoning') return null;
+    return this._lastForceReasoning ? { capability: 'reasoning' } : null;
   }
 
   getLastDecisionSummary(): DecisionSummary | null { return this._lastDecisionSummary; }
   getLastExecutionTrace(): ExecutionTrace | null { return this._lastExecutionTrace; }
   getLastRedFlag(): RedFlagResult | null { return this._lastRedFlag; }
+  getLastForceReasoning(): boolean | null { return this._intelligenceEnabled ? this._lastForceReasoning : null; }
 
   private registerBuiltinTools(): void {
     for (const tool of getBuiltinTools()) {
@@ -275,6 +291,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     messages: Message[];
     systemPrompt?: string;
     tools?: import('./types.js').ToolDefinition[];
+    capability?: 'reasoning';
   }): Promise<LLMResponse> {
     // Estimate tokens for rate limiting
     const estimatedTokens = this.contextManager.estimateTokenCount(options.messages);
@@ -582,6 +599,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         messages,
         systemPrompt: this.systemPrompt,
         tools: toolDefs.length > 0 ? toolDefs : undefined,
+        ...(this._resolveModelHint() ?? {}),
       });
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -772,6 +790,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
           messages,
           systemPrompt: this.systemPrompt,
           tools: toolDefs.length > 0 ? toolDefs : undefined,
+          ...(this._resolveModelHint() ?? {}),
         },
         callbacks,
       );
