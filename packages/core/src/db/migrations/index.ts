@@ -12,10 +12,11 @@ interface MigrationResult {
 
 export function runCognitiveMemoryMigrations(db: Database.Database): MigrationResult {
   const migrations = [
-    {
-      id: '001_cognitive_memory',
-      sql: fs.readFileSync(path.join(import.meta.dirname, '001_cognitive_memory.sql'), 'utf-8'),
-    },
+    { id: '001_cognitive_memory',  sql: fs.readFileSync(path.join(import.meta.dirname, '001_cognitive_memory.sql'),  'utf-8') },
+    { id: '002_learning_signals',  sql: fs.readFileSync(path.join(import.meta.dirname, '002_learning_signals.sql'),  'utf-8') },
+    { id: '003_entity_aliases',    sql: fs.readFileSync(path.join(import.meta.dirname, '003_entity_aliases.sql'),    'utf-8') },
+    { id: '005_lifelong_memory',   sql: fs.readFileSync(path.join(import.meta.dirname, '005_lifelong_memory.sql'),   'utf-8') },
+    { id: '006_document_identity', sql: fs.readFileSync(path.join(import.meta.dirname, '006_document_identity.sql'), 'utf-8') },
   ];
 
   const schemaTable = 'schema_migrations_cognitive';
