@@ -32,7 +32,7 @@ function columnNames(database: Database.Database, tableName: string): string[] {
 describe('cognitive memory migrations', () => {
   it('applies all migrations cleanly on a fresh database', () => {
     const result = runCognitiveMemoryMigrations(db);
-    expect(result.count).toBe(5);
+    expect(result.count).toBe(6);
     expect(result.ftsAvailable).toBe(true);
   });
 
@@ -51,6 +51,7 @@ describe('cognitive memory migrations', () => {
       '003_entity_aliases',
       '005_lifelong_memory',
       '006_document_identity',
+      '007_fts_contentless',
     ]);
   });
 
@@ -94,6 +95,6 @@ describe('cognitive memory migrations', () => {
     // Apply 001 directly so the rest of the chain has its tables.
     db.exec(fs.readFileSync(path.join(__dirname, '../../src/db/migrations/001_cognitive_memory.sql'), 'utf-8'));
     const result = runCognitiveMemoryMigrations(db);
-    expect(result.count).toBe(4); // 002–006 applied, 001 skipped
+    expect(result.count).toBe(5); // 002, 003, 005, 006, 007 applied, 001 skipped
   });
 });

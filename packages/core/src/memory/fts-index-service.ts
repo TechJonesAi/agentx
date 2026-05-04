@@ -21,28 +21,28 @@ export class FtsIndexService {
 
   upsertDocumentFts(documentId: string, content: DocumentFtsContent): void {
     try {
-      const stmt = this.db.prepare(`
-        INSERT INTO documents_fts (document_id, title, sender, recipient, subject, content, file_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(document_id) DO UPDATE SET
-          title = excluded.title,
-          sender = excluded.sender,
-          recipient = excluded.recipient,
-          subject = excluded.subject,
-          content = excluded.content,
-          file_name = excluded.file_name
-      `);
-
-      stmt.run(
+      // The auto-insert trigger on `documents` already created an FTS row at the
+      // documents.rowid. We rebuild it here with full content. The post-007
+      // FTS table is contentless, so DELETE+INSERT keyed on rowid is safe.
+      const row = this.db.prepare('SELECT rowid FROM documents WHERE document_id = ?').get(documentId) as { rowid: number } | undefined;
+      if (!row) {
+        log.warn({ documentId }, 'upsertDocumentFts: document not found');
+        return;
+      }
+      this.db.prepare(`INSERT INTO documents_fts(documents_fts, rowid) VALUES('delete', ?)`).run(row.rowid);
+      this.db.prepare(`
+        INSERT INTO documents_fts(rowid, document_id, title, sender, recipient, subject, content, file_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        row.rowid,
         documentId,
-        content.title ?? null,
-        content.sender ?? null,
-        content.recipient ?? null,
-        content.subject ?? null,
+        content.title ?? '',
+        content.sender ?? '',
+        content.recipient ?? '',
+        content.subject ?? '',
         content.content,
-        content.file_name ?? null,
+        content.file_name ?? '',
       );
-
       this.markDocumentSynced(documentId);
     } catch (error) {
       log.error({ documentId, error }, 'Failed to upsert document FTS');
@@ -52,13 +52,16 @@ export class FtsIndexService {
 
   upsertChunkFts(chunkId: string, documentId: string, content: string): void {
     try {
-      const stmt = this.db.prepare(`
-        INSERT INTO chunks_fts (chunk_id, document_id, content)
-        VALUES (?, ?, ?)
-        ON CONFLICT(chunk_id) DO UPDATE SET content = excluded.content
-      `);
-
-      stmt.run(chunkId, documentId, content);
+      const row = this.db.prepare('SELECT rowid FROM document_chunks WHERE chunk_id = ?').get(chunkId) as { rowid: number } | undefined;
+      if (!row) {
+        log.warn({ chunkId }, 'upsertChunkFts: chunk not found');
+        return;
+      }
+      this.db.prepare(`INSERT INTO chunks_fts(chunks_fts, rowid) VALUES('delete', ?)`).run(row.rowid);
+      this.db.prepare(`
+        INSERT INTO chunks_fts(rowid, chunk_id, document_id, content)
+        VALUES (?, ?, ?, ?)
+      `).run(row.rowid, chunkId, documentId, content);
       this.markChunkSynced(chunkId);
     } catch (error) {
       log.error({ chunkId, documentId, error }, 'Failed to upsert chunk FTS');
@@ -68,10 +71,14 @@ export class FtsIndexService {
 
   searchDocuments(query: string, limit: number = 10): Array<{ document_id: string; rank: number }> {
     try {
+      // Contentless FTS5 doesn't store column values; resolve document_id via
+      // rowid join with the source documents table.
       const stmt = this.db.prepare(`
-        SELECT document_id, rank FROM documents_fts
+        SELECT d.document_id AS document_id, fts.rank AS rank
+        FROM documents_fts fts
+        JOIN documents d ON d.rowid = fts.rowid
         WHERE documents_fts MATCH ?
-        ORDER BY rank
+        ORDER BY fts.rank
         LIMIT ?
       `);
 
@@ -85,10 +92,13 @@ export class FtsIndexService {
 
   searchChunks(query: string, limit: number = 10): Array<{ chunk_id: string; document_id: string; rank: number }> {
     try {
+      // Contentless FTS5 — resolve chunk_id and document_id via rowid join.
       const stmt = this.db.prepare(`
-        SELECT chunk_id, document_id, rank FROM chunks_fts
+        SELECT c.chunk_id AS chunk_id, c.document_id AS document_id, fts.rank AS rank
+        FROM chunks_fts fts
+        JOIN document_chunks c ON c.rowid = fts.rowid
         WHERE chunks_fts MATCH ?
-        ORDER BY rank
+        ORDER BY fts.rank
         LIMIT ?
       `);
 

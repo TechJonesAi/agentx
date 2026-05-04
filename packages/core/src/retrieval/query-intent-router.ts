@@ -48,6 +48,13 @@ export class QueryIntentRouter {
       /\bshows?\s+all.*where\b/,
       /\bmentions?\s+of\b/,
       /\bwhich documents.*mention\b/,
+      // R1.5 — exact-reference patterns
+      /\b(all|every|each)\s+(references?|mentions?|occurrences?)\b/,
+      /\b(references?|mentions?)\s+to\s+\w/,
+      /\bshow\s+all\b/,
+      /\blist\s+(all|every)\b/,
+      /\bfind\s+(all|every)\s+(mentions?|references?|occurrences?)/,
+      /\b(documents?|files?)\s+(that\s+)?(mention|reference|contain)\b/,
     ];
 
     return exactPatterns.some(pattern => pattern.test(query));

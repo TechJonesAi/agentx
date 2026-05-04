@@ -94,23 +94,105 @@ export class RetrievalService {
     }
   }
 
+  /**
+   * R1.5: Parse a count-intent query for type filters and count via SQL only.
+   * The LLM is never consulted for counts. Recognised filters:
+   *   - file_type: "pdf"/"pdfs", "txt"/"txts", "docx", "image"/"images", "json"
+   *   - content_type: "email"/"emails", "report"/"reports", "letter"/"letters",
+   *     "legal"/"legal documents", "policy"/"policies", "transcript"/"transcripts"
+   *   - origin_type: "scanned"/"scanned documents"/"OCR"
+   * If multiple filters match the most-specific (file_type) wins.
+   * If none match, the total count is returned.
+   */
   private handleCountQuery(query: string): RetrievalResult[] {
-    const docCount = this.registry.count();
+    const filters = this.parseCountFilters(query);
+    const count = this.registry.count(filters);
     const result: RetrievalResult = {
       result_id: generateId('result'),
       log_id: '',
       document_id: '',
       rank: 1,
-      score: docCount,
+      score: count,
       score_type: 'count',
       created_at: Date.now(),
     };
     return [result];
   }
 
+  /** R1.5 helper — exposed for testing. */
+  parseCountFilters(query: string): Partial<{
+    file_type: string;
+    origin_type: string;
+    classification_label: string;
+  }> {
+    const q = query.toLowerCase();
+    const filters: Partial<{ file_type: string; origin_type: string; classification_label: string }> = {};
+
+    // file_type (most specific — wins)
+    if (/\bpdfs?\b/.test(q))               filters.file_type = 'pdf';
+    else if (/\b(txt|text)s?\b/.test(q))   filters.file_type = 'txt';
+    else if (/\bdocx\b/.test(q))           filters.file_type = 'docx';
+    else if (/\b(images?|jpe?gs?|pngs?)\b/.test(q)) filters.file_type = 'image';
+    else if (/\bjsons?\b/.test(q))         filters.file_type = 'json';
+
+    // content_type via classification_label
+    if (!filters.file_type) {
+      if (/\bemails?\b/.test(q))           filters.classification_label = 'email';
+      else if (/\breports?\b/.test(q))     filters.classification_label = 'report';
+      else if (/\bletters?\b/.test(q))     filters.classification_label = 'letter';
+      else if (/\bpolic(y|ies)\b/.test(q)) filters.classification_label = 'policy';
+      else if (/\btranscripts?\b/.test(q)) filters.classification_label = 'transcript';
+      else if (/\blegal\b/.test(q))        filters.classification_label = 'legal_document';
+    }
+
+    // origin_type
+    if (/\b(scanned|ocr|ocr-noisy)\b/.test(q)) filters.origin_type = 'scanned';
+
+    return filters;
+  }
+
+  /**
+   * R1.5: When a query asks for "all"/"every"/"list every"/"show all",
+   * exact-search must NOT silently truncate to topK.
+   */
+  private isAllMatchQuery(query: string): boolean {
+    const q = query.toLowerCase();
+    return /\b(all|every|list (every|all)|show all|each)\b/.test(q);
+  }
+
+  /**
+   * R1.5: extract the target phrase from a natural-language exact-search query.
+   * "show all references to robert moyes" → "robert moyes"
+   * "list every mention of grievance" → "grievance"
+   * '"exact phrase"' → "exact phrase"
+   */
+  extractExactSearchPhrase(query: string): string {
+    // 1) if the whole query is wrapped in quotes, return the inner content
+    const quoted = query.match(/^"([^"]+)"$|^'([^']+)'$/);
+    if (quoted) return quoted[1] ?? quoted[2] ?? '';
+
+    // 2) try common natural-language patterns
+    const patterns: RegExp[] = [
+      /\b(?:references?|mentions?|occurrences?|references? to|mentions? of)\s+(?:to\s+|of\s+)?(.+?)$/i,
+      /\b(?:which|what)\s+documents?\s+(?:that\s+)?(?:mention|reference|contain)\s+(.+?)$/i,
+      /\b(?:find|show|list|get)\s+(?:all\s+|every\s+)?(?:documents?|files?)?\s*(?:that\s+)?(?:mention|reference|contain)\s+(.+?)$/i,
+      /\b(?:find|show|list|get)\s+(?:all\s+|every\s+)?(?:references?|mentions?|occurrences?)\s+(?:to|of)\s+(.+?)$/i,
+      /\bnamed\s+(.+?)$/i,
+      /\bcalled\s+(.+?)$/i,
+    ];
+    for (const re of patterns) {
+      const m = query.match(re);
+      if (m && m[1]) return m[1].replace(/[\?\.\!]+$/, '').trim();
+    }
+    // 3) fallback: whole query (legacy behaviour, but with quote stripping)
+    return query.replace(/^["']|["']$/g, '').trim();
+  }
+
   private handleExactSearch(query: string, topK: number): RetrievalResult[] {
-    const cleanQuery = query.replace(/^["']|["']$/g, '');
-    const ftsResults = this.ftsIndex.phraseSearch(cleanQuery, topK);
+    const phrase = this.extractExactSearchPhrase(query);
+    // R1.5: lift the topK cap when the query explicitly asks for "all references"
+    const limit = this.isAllMatchQuery(query) ? 10_000 : topK;
+    const ftsResults = this.ftsIndex.phraseSearch(phrase, limit);
 
     const results: RetrievalResult[] = [];
     for (let rank = 0; rank < ftsResults.length; rank++) {
