@@ -14,3 +14,7 @@ coverage/
 .turbo/
 tmp/
 ~/.agentx/
+
+# Local Claude/worktree and binary tooling
+.claude/
+tools/
