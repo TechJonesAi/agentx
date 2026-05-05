@@ -259,6 +259,9 @@ export interface AgentConfig {
     retrieval?: {
       enabled: boolean;
     };
+    entityIndexing?: {
+      enabled: boolean;
+    };
   };
   providers: {
     anthropic?: { model: string; maxTokens: number };

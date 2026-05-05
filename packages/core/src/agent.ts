@@ -42,6 +42,7 @@ import { runCognitiveMemoryMigrations } from './db/migrations/index.js';
 import { DocumentRegistry } from './memory/document-registry.js';
 import type { QueryIntent, RetrievalResult } from './memory/types.js';
 import type { RetrievalMetadata, RetrievalMetadataDocument } from './types.js';
+import { EntityIngestionService, type EntityIngestionResult } from './entities/entity-ingestion-service.js';
 
 const log = createLogger('agent');
 
@@ -107,6 +108,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _lastRetrievalIntent: QueryIntent | null = null;
   private _lastRetrievalResults: RetrievalResult[] = [];
   private _lastRetrievalMetadata: RetrievalMetadata | null = null;
+
+  // R5: Entity ingestion
+  private _entityIndexingEnabled = false;
+  private _entityIngestionService: EntityIngestionService | null = null;
 
   constructor(configPath?: string) {
     super();
@@ -246,6 +251,13 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       this._retrievalService = new RetrievalService(this.db);
     }
 
+    // R5: Initialize entity ingestion if enabled (independent of retrieval flag)
+    if (this.config.agent.entityIndexing?.enabled) {
+      runCognitiveMemoryMigrations(this.db);
+      this._entityIndexingEnabled = true;
+      this._entityIngestionService = new EntityIngestionService(this.db);
+    }
+
     // Phase 4/5: Initialize intelligence observation + optional influence
     const intel = this.config.agent.intelligence;
     if (intel?.enabled) {
@@ -365,6 +377,19 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getLastRetrievalIntent(): QueryIntent | null { return this._lastRetrievalIntent; }
   getLastRetrievalResults(): RetrievalResult[] { return this._lastRetrievalResults; }
   getLastRetrievalMetadata(): RetrievalMetadata | null { return this._lastRetrievalMetadata; }
+
+  /**
+   * R5: Ingest entity mentions for a document. Removes any pre-existing
+   * mentions for the document first, then extracts + writes fresh ones.
+   * Returns null when the entity-indexing feature flag is off.
+   */
+  ingestDocumentEntities(documentId: string, text: string): EntityIngestionResult | null {
+    if (!this._entityIndexingEnabled || !this._entityIngestionService) return null;
+    return this._entityIngestionService.ingestDocument(documentId, text);
+  }
+
+  /** R5: Whether entity indexing is enabled for this agent. */
+  isEntityIndexingEnabled(): boolean { return this._entityIndexingEnabled; }
 
   private registerBuiltinTools(): void {
     for (const tool of getBuiltinTools()) {

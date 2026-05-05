@@ -8,6 +8,8 @@ agent:
     influenceMode: off
   retrieval:
     enabled: false
+  entityIndexing:
+    enabled: false
 
 providers:
   anthropic:
