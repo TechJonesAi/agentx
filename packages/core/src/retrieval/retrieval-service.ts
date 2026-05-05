@@ -198,71 +198,85 @@ export class RetrievalService {
   }
 
   /**
-   * R4: exact-search routes through EntityIndexService FIRST when entity
-   * matches exist (preferred — entity index has structured per-document
-   * mention data), then falls back to FTS5 phrase search.
+   * R4/R6: exact-search routes through EntityIndexService FIRST. If entity
+   * results don't fill the requested limit, supplement with FTS5 phrase
+   * search and merge by document_id.
    *
-   * The 'isAllMatchQuery' cap-lift from R1.5 applies to BOTH paths so
-   * "show all references to X" returns every match regardless of which
-   * source produced them.
+   * Source labelling:
+   *   - 'entity' — at least one entity match AND FTS contributed nothing new
+   *   - 'fts'    — no entity match (or empty results overall)
+   *   - 'mixed'  — entity matched AND FTS added at least one new document
+   *
+   * The 'isAllMatchQuery' cap-lift from R1.5 applies on both legs so
+   * "show all references to X" returns every match across both sources.
    */
   private handleExactSearch(query: string, topK: number, sourceInfo: { source: RetrievalSource }): RetrievalResult[] {
     const phrase = this.extractExactSearchPhrase(query);
     const limit = this.isAllMatchQuery(query) ? 10_000 : topK;
 
-    // 1) Try entity index first
-    const entities = this.entityIndex.searchEntitiesByNormalized(phrase.toLowerCase());
-    if (entities.length > 0) {
-      const seen = new Set<string>();
-      const results: RetrievalResult[] = [];
-      for (const entity of entities) {
-        const mentions = this.entityIndex.getMentionsByEntity(entity.entity_id);
-        for (const m of mentions) {
-          if (seen.has(m.document_id)) continue;
-          seen.add(m.document_id);
-          const doc = this.registry.get(m.document_id);
-          if (!doc) continue;
-          results.push({
-            result_id: generateId('result'),
-            log_id: '',
-            document_id: doc.document_id,
-            chunk_id: m.chunk_id,
-            rank: results.length + 1,
-            score: 1.0,
-            score_type: 'entity_match',
-            matched_field: 'entity_mention',
-            created_at: Date.now(),
-          });
-          if (results.length >= limit) break;
-        }
-        if (results.length >= limit) break;
-      }
-      if (results.length > 0) {
-        sourceInfo.source = 'entity';
-        return this.aggregator.deduplicate(results);
-      }
-    }
-
-    // 2) Fall back to FTS5 phrase search
-    sourceInfo.source = 'fts';
-    const ftsResults = this.ftsIndex.phraseSearch(phrase, limit);
+    const seen = new Set<string>();
     const results: RetrievalResult[] = [];
-    for (let rank = 0; rank < ftsResults.length; rank++) {
-      const ftsResult = ftsResults[rank];
-      const doc = this.registry.get(ftsResult.document_id);
-      if (doc) {
+
+    // 1) Entity-index leg
+    const entities = this.entityIndex.searchEntitiesByNormalized(phrase.toLowerCase());
+    let entityResultsCount = 0;
+    for (const entity of entities) {
+      const mentions = this.entityIndex.getMentionsByEntity(entity.entity_id);
+      for (const m of mentions) {
+        if (seen.has(m.document_id)) continue;
+        seen.add(m.document_id);
+        const doc = this.registry.get(m.document_id);
+        if (!doc) continue;
         results.push({
           result_id: generateId('result'),
           log_id: '',
           document_id: doc.document_id,
-          rank: rank + 1,
+          chunk_id: m.chunk_id,
+          rank: results.length + 1,
+          score: 1.0,
+          score_type: 'entity_match',
+          matched_field: 'entity_mention',
+          created_at: Date.now(),
+        });
+        entityResultsCount++;
+        if (results.length >= limit) break;
+      }
+      if (results.length >= limit) break;
+    }
+
+    // 2) Supplement with FTS only when entity didn't fill the limit
+    let ftsContributed = 0;
+    if (results.length < limit) {
+      const ftsResults = this.ftsIndex.phraseSearch(phrase, limit);
+      for (const ftsResult of ftsResults) {
+        if (seen.has(ftsResult.document_id)) continue; // already from entity leg
+        seen.add(ftsResult.document_id);
+        const doc = this.registry.get(ftsResult.document_id);
+        if (!doc) continue;
+        results.push({
+          result_id: generateId('result'),
+          log_id: '',
+          document_id: doc.document_id,
+          rank: results.length + 1,
           score: 1.0,
           score_type: 'exact_match',
           matched_field: 'full_text',
           created_at: Date.now(),
         });
+        ftsContributed++;
+        if (results.length >= limit) break;
       }
     }
+
+    // 3) Source labelling
+    if (entityResultsCount > 0 && ftsContributed > 0) {
+      sourceInfo.source = 'mixed';
+    } else if (entityResultsCount > 0) {
+      sourceInfo.source = 'entity';
+    } else {
+      sourceInfo.source = 'fts';
+    }
+
     return this.aggregator.deduplicate(results);
   }
 

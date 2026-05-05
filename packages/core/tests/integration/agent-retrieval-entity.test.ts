@@ -180,19 +180,20 @@ describe('R4 — exact-name queries route through entity index when entities exi
     await agent.shutdown?.();
   });
 
-  it('entity path is preferred even when FTS would also match', async () => {
+  it('entity path is preferred even when FTS would also match the same docs', async () => {
     const agent = buildAgent({ retrieval: { enabled: true } });
     const db = getDb(agent);
-    // Seed both entity AND FTS — entity should win
+    // Seed both entity AND FTS pointing at the SAME documents.
+    // Per R6, FTS is now consulted to supplement entity results below the limit,
+    // but since FTS finds only docs already returned by entity, no new docs are
+    // added — source remains 'entity'.
     const docs = seedDocs(db, 5, { sender: 'robert moyes', ftsSeed: true });
     seedEntity(db, 'Robert Moyes', 'robert moyes', docs);
-    // Spy on FTS phraseSearch — should NOT be called because entity hit first
-    const phraseSpy = vi.spyOn(FtsIndexService.prototype, 'phraseSearch');
     stubProvider(agent);
     await agent.chat('show all references to robert moyes');
-    expect(phraseSpy).not.toHaveBeenCalled();
-    expect(agent.getLastRetrievalMetadata()!.retrievalSource).toBe('entity');
-    phraseSpy.mockRestore();
+    const meta = agent.getLastRetrievalMetadata()!;
+    expect(meta.retrievalSource).toBe('entity');
+    expect(meta.retrievalMatchCount).toBe(5);
     await agent.shutdown?.();
   });
 });
