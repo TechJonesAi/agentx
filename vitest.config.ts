@@ -1,4 +1,8 @@
 import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from 'node:url';
+import * as path from 'node:path';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   test: {
@@ -15,7 +19,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@agentx/core': '/Users/darrenjones/AgentX/packages/core/src/index.ts',
+      // Repo-rooted alias so web tests can import @agentx/core from anywhere.
+      '@agentx/core': path.join(__dirname, 'packages', 'core', 'src', 'index.ts'),
     },
   },
 });

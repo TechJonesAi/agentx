@@ -297,6 +297,17 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       entityIndexing: this._entityIndexingEnabled,
       intelligence: this._intelligenceEnabled,
     }, 'Agent initialized');
+
+    // Loud warning when the configured provider has no auth and isn't a
+    // local provider. Surfaces to the startup log so operators see this
+    // before the first chat() call returns 503.
+    const providerId = this.config.agent.defaultProvider;
+    if (providerId === 'anthropic' && !process.env['ANTHROPIC_API_KEY']) {
+      log.warn({ providerId }, 'ANTHROPIC_API_KEY not set — chat() will fail with PROVIDER_AUTH_MISSING. Set the env var or switch agent.defaultProvider to ollama.');
+    }
+    if (providerId === 'openai' && !process.env['OPENAI_API_KEY']) {
+      log.warn({ providerId }, 'OPENAI_API_KEY not set — chat() will fail with PROVIDER_AUTH_MISSING. Set the env var or switch agent.defaultProvider to ollama.');
+    }
   }
 
   // Phase 4: observation-only orchestration. Pure side-effect on private fields.

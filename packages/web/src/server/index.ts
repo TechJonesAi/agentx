@@ -189,16 +189,37 @@ export function getEmbeddedHtml(): string {
     .feedback-comment { margin-top: 6px; display: flex; gap: 6px; }
     .feedback-comment input { flex: 1; background: #0a1a2e; border: 1px solid #0f3460; color: #e0e0e0; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
     .feedback-status { color: #4ecca3; font-size: 11px; margin-left: 8px; }
+    /* Header model badge (provider + model) */
+    .model-badge { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; padding: 4px 10px; border-radius: 4px; background: #0a1a2e; border: 1px solid #0f3460; }
+    .model-badge .provider { color: #4ecca3; font-weight: 600; text-transform: uppercase; font-size: 10px; }
+    .model-badge .model-name { color: #e0e0e0; }
+    .model-badge .badge-warn { color: #ff8c69; font-size: 11px; margin-left: 4px; }
+    /* Provider list (Settings → Models) */
+    .provider-row { padding: 8px 12px; margin-bottom: 6px; background: #0f3460; border-radius: 6px; display: flex; gap: 12px; align-items: center; }
+    .provider-row.active { border: 1px solid #4ecca3; }
+    .provider-row .pid { font-weight: 600; min-width: 80px; }
+    .provider-row .plabel { color: #c0c8d0; flex: 1; }
+    .provider-row .pstate.ok { color: #4ecca3; }
+    .provider-row .pstate.warn { color: #ff8c69; }
+    .switch-instructions { margin-top: 12px; padding: 10px; background: #0a1a2e; border-radius: 6px; font-size: 12px; color: #c0c8d0; line-height: 1.5; }
+    /* Categorised error banner in chat */
+    .chat-error-banner { background: #3a1a1a; border: 1px solid #ff8c69; color: #ffc6b3; padding: 10px 12px; border-radius: 6px; margin: 8px 0; font-size: 13px; }
+    .chat-error-banner .err-code { font-family: monospace; font-size: 11px; color: #ff8c69; display: block; margin-top: 4px; }
   </style>
 </head>
 <body>
   <header>
     <div class="status" id="status"></div>
     <h1>AgentX</h1>
+    <span id="modelBadge" class="model-badge" title="Click 'Models' to see provider availability">
+      <span class="provider" id="badgeProvider">…</span>
+      <span class="model-name" id="badgeModel">…</span>
+    </span>
     <nav>
       <button class="active" onclick="showPage('chat')">Chat</button>
       <button onclick="showPage('sessions')">Sessions</button>
-      <button onclick="showPage('skills')">Skills</button>
+      <button onclick="showPage('skills')">Tools</button>
+      <button onclick="showPage('models')">Models</button>
       <button onclick="showPage('settings')">Settings</button>
     </nav>
   </header>
@@ -342,8 +363,21 @@ export function getEmbeddedHtml(): string {
                   contentSpan.textContent = event.content;
                 }
               } else if (event.type === 'error') {
-                fullContent += '\\nError: ' + event.message;
-                contentSpan.textContent = fullContent;
+                // Render a categorised error banner instead of inlining the
+                // raw error into the response text.
+                const banner = document.createElement('div');
+                banner.className = 'chat-error-banner';
+                banner.textContent = event.message || 'Server error';
+                if (event.code) {
+                  const code = document.createElement('span');
+                  code.className = 'err-code';
+                  code.textContent = 'code: ' + event.code;
+                  banner.appendChild(code);
+                }
+                msgDiv.parentElement.insertBefore(banner, msgDiv);
+                if (!fullContent) {
+                  contentSpan.textContent = '(failed)';
+                }
               }
             } catch { /* skip malformed SSE */ }
           }
@@ -486,21 +520,77 @@ export function getEmbeddedHtml(): string {
             skills.map(s => '<div class="field"><div class="value">' + s.name + ' v' + s.version + '</div><div>' + s.description + '</div></div>').join('') +
             '</div>';
         } catch { main.innerHTML = '<div class="settings-panel"><h2>Skills</h2><p>Failed to load</p></div>'; }
+      } else if (page === 'models') {
+        footer.style.display = 'none';
+        main.innerHTML = '<div class="settings-panel"><h2>Models &amp; Providers</h2><p>Loading…</p></div>';
+        try {
+          const res = await fetch('/api/providers');
+          const data = await res.json();
+          const rows = (data.providers || []).map(function(p) {
+            const isActive = p.id === data.active;
+            const cls = 'provider-row' + (isActive ? ' active' : '');
+            const stateClass = p.configured ? 'pstate ok' : 'pstate warn';
+            const stateText = p.configured ? 'configured' : 'NOT configured (' + escapeHtml(String(p.configuredVia || '')) + ')';
+            return '<div class="' + cls + '">' +
+              '<span class="pid">' + escapeHtml(String(p.id)) + (isActive ? ' ★' : '') + '</span>' +
+              '<span class="plabel">' + escapeHtml(String(p.label || '')) + ' — model: ' + escapeHtml(String(p.defaultModel || '')) + '</span>' +
+              '<span class="' + stateClass + '">' + stateText + '</span>' +
+              '</div>';
+          }).join('');
+          main.innerHTML = '<div class="settings-panel">' +
+            '<h2>Models &amp; Providers</h2>' +
+            '<div class="field"><label>Active</label><div class="value">' +
+              escapeHtml(String(data.active || '?')) + ' / ' + escapeHtml(String(data.activeModel || '?')) +
+            '</div></div>' +
+            rows +
+            '<div class="switch-instructions">' + escapeHtml(String(data.switchInstructions || '')) + '</div>' +
+            '</div>';
+        } catch (e) {
+          main.innerHTML = '<div class="settings-panel"><h2>Models &amp; Providers</h2><p>Failed to load: ' + escapeHtml((e && e.message) ? e.message : String(e)) + '</p></div>';
+        }
       } else if (page === 'settings') {
         footer.style.display = 'none';
         main.innerHTML = '<div class="settings-panel"><h2>Settings</h2><p>Loading...</p></div>';
         try {
-          const res = await fetch('/api/status');
-          const status = await res.json();
+          const [statusRes, provRes] = await Promise.all([fetch('/api/status'), fetch('/api/providers')]);
+          const status = await statusRes.json();
+          const provs = await provRes.json();
+          const activeProv = (provs.providers || []).find(function(p) { return p.id === provs.active; });
+          const provWarn = activeProv && !activeProv.configured
+            ? '<div class="badge-warn">⚠ Provider not configured — set ' + escapeHtml(String(activeProv.configuredVia || '')) + '</div>'
+            : '';
           main.innerHTML = '<div class="settings-panel"><h2>Settings</h2>' +
-            '<div class="field"><label>Agent Name</label><div class="value">' + status.agentName + '</div></div>' +
-            '<div class="field"><label>Model</label><div class="value">' + status.model + '</div></div>' +
+            '<div class="field"><label>Agent Name</label><div class="value">' + escapeHtml(String(status.agentName)) + '</div></div>' +
+            '<div class="field"><label>Active Provider</label><div class="value">' + escapeHtml(String(provs.active || '?')) + provWarn + '</div></div>' +
+            '<div class="field"><label>Model</label><div class="value">' + escapeHtml(String(status.model)) + '</div></div>' +
             '<div class="field"><label>Active Sessions</label><div class="value">' + status.activeSessions + '</div></div>' +
-            '<div class="field"><label>Integrations</label><div class="value">' + (status.integrations||[]).join(', ') + '</div></div>' +
+            '<div class="field"><label>Integrations</label><div class="value">' + (status.integrations||[]).map(escapeHtml).join(', ') + '</div></div>' +
+            '<div class="switch-instructions">To switch providers, edit <code>config/default.yaml</code> → <code>agent.defaultProvider</code> (one of: anthropic, openai, ollama) and restart. Use <strong>ollama</strong> for free local inference.</div>' +
             '</div>';
         } catch { main.innerHTML = '<div class="settings-panel"><h2>Settings</h2><p>Failed to load</p></div>'; }
       }
     }
+
+    /** Populate the header model badge from /api/providers. */
+    async function refreshModelBadge() {
+      try {
+        const r = await fetch('/api/providers');
+        const d = await r.json();
+        const active = (d.providers || []).find(p => p.id === d.active);
+        document.getElementById('badgeProvider').textContent = d.active || '?';
+        document.getElementById('badgeModel').textContent = d.activeModel || '?';
+        if (active && !active.configured) {
+          const badge = document.getElementById('modelBadge');
+          if (!badge.querySelector('.badge-warn')) {
+            const warn = document.createElement('span');
+            warn.className = 'badge-warn';
+            warn.textContent = '⚠ not configured';
+            badge.appendChild(warn);
+          }
+        }
+      } catch { /* keep ellipsis */ }
+    }
+    refreshModelBadge();
 
     // Check agent health
     async function checkHealth() {

@@ -61,6 +61,11 @@ function sendJson(res: http.ServerResponse, status: number, data: unknown): void
   res.end(JSON.stringify(data));
 }
 
+// categoriseChatError lives in a sibling file so web tests can import it
+// without tripping vitest's @agentx/core alias.
+import { categoriseChatError } from '../chat-error.js';
+export { categoriseChatError };
+
 function sendTwiml(res: http.ServerResponse, twiml: string): void {
   res.writeHead(200, { 'Content-Type': 'text/xml' });
   res.end(twiml);
@@ -94,6 +99,44 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // ─── Providers (R+: provider availability for UI/diagnostics) ──
+        if (route === '/api/providers' && method === 'GET') {
+          const config = agent.getConfig();
+          const active = config.agent.defaultProvider;
+          const activeModel = config.agent.model;
+          const providers = [
+            {
+              id: 'anthropic',
+              label: 'Anthropic Claude (cloud, paid)',
+              configured: !!process.env['ANTHROPIC_API_KEY'],
+              configuredVia: 'ANTHROPIC_API_KEY env',
+              defaultModel: config.providers.anthropic?.model ?? 'claude-sonnet-4-20250514',
+            },
+            {
+              id: 'openai',
+              label: 'OpenAI (cloud, paid)',
+              configured: !!process.env['OPENAI_API_KEY'],
+              configuredVia: 'OPENAI_API_KEY env',
+              defaultModel: config.providers.openai?.model ?? 'gpt-4o',
+            },
+            {
+              id: 'ollama',
+              label: 'Ollama (local, free)',
+              configured: true,
+              configuredVia: 'baseUrl in config (no API key required)',
+              defaultModel: config.providers.ollama?.model ?? 'llama3',
+            },
+          ];
+          sendJson(res, 200, {
+            active,
+            activeModel,
+            providers,
+            switchInstructions:
+              "To switch providers: set agent.defaultProvider in config/default.yaml (or DATA_DIR/config.yaml) and restart the server. To remain free, set defaultProvider: ollama with a model name your local Ollama serves.",
+          });
+          return;
+        }
+
         // ─── Status ──────────────────────────────────────────────────────
         if (route === '/api/status' && method === 'GET') {
           const config = agent.getConfig();
@@ -118,14 +161,25 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             return;
           }
 
-          const response = await agent.chat(message, sessionId);
-          // R3: surface retrieval metadata when the agent has it (flag on).
-          const retrievalMeta = agent.getLastRetrievalMetadata?.() ?? null;
-          sendJson(res, 200, {
-            response,
-            sessionId: sessionId ?? 'default',
-            ...(retrievalMeta ? { retrieval: retrievalMeta } : {}),
-          });
+          try {
+            const response = await agent.chat(message, sessionId);
+            // R3: surface retrieval metadata when the agent has it (flag on).
+            const retrievalMeta = agent.getLastRetrievalMetadata?.() ?? null;
+            sendJson(res, 200, {
+              response,
+              sessionId: sessionId ?? 'default',
+              ...(retrievalMeta ? { retrieval: retrievalMeta } : {}),
+            });
+          } catch (chatErr) {
+            const categorised = categoriseChatError(chatErr);
+            // Full stack stays in server log via the existing log.error in
+            // the outer route handler; the client gets the safe summary.
+            log.error({ code: categorised.code, raw: categorised.raw }, 'chat() failed');
+            sendJson(res, categorised.status, {
+              error: categorised.userMessage,
+              code: categorised.code,
+            });
+          }
           return;
         }
 
@@ -167,8 +221,9 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               },
             }, sessionId);
           } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            res.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+            const categorised = categoriseChatError(error);
+            log.error({ code: categorised.code, raw: categorised.raw }, 'chatStream() failed');
+            res.write(`data: ${JSON.stringify({ type: 'error', code: categorised.code, message: categorised.userMessage })}\n\n`);
           }
 
           res.end();
