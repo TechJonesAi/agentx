@@ -329,28 +329,25 @@ describe('E2E — flags ON (retrieval + entity indexing enabled via env)', () =>
     expect(withSnippet).toBeGreaterThanOrEqual(1);
   });
 
-  it('Test 6a — semantic-style query routes to SEMANTIC intent (vector/mixed source)', async () => {
+  it('Test 6 — semantic retrieval (R12 normalization): natural-language query retrieves grievance doc', async () => {
+    // Post-R12: handleSemanticSearch normalizes the query before FTS5 MATCH,
+    // stripping stop words ("what", "documents", "are", "about", "issues",
+    // "and") so the AND-of-tokens semantics no longer return 0 rows for
+    // natural-language questions. Spec wording works end-to-end now.
     await agent.chat('What documents are about HR escalation and payroll issues?');
-    const meta = agent.getLastRetrievalMetadata()!;
-    expect(meta.retrievalIntent).toBe('SEMANTIC');
-    expect(['vector', 'mixed']).toContain(meta.retrievalSource);
-  });
-
-  it('Test 6b — semantic chunk-FTS retrieves grievance doc when query tokens overlap chunk content', async () => {
-    // Note: handleSemanticSearch passes the raw query to FTS5 MATCH (default
-    // AND across tokens). The user's literal phrasing in the spec contains
-    // stop words ("what", "documents", "are", "about", "issues") that no
-    // seeded chunk contains, so AND would yield 0 docs. Using a stop-word-
-    // free keyword phrase verifies the underlying chunk-FTS pipeline can
-    // retrieve the intended doc when the query overlaps chunk content.
-    await agent.chat('HR escalation payroll');
     const meta = agent.getLastRetrievalMetadata()!;
     expect(meta.retrievalIntent).toBe('SEMANTIC');
     expect(['vector', 'mixed']).toContain(meta.retrievalSource);
     const fileNames = meta.retrievalDocuments.map(d => d.file_name);
     expect(fileNames).toContain('grievance_robert_moyes.pdf');
-    // System prompt is augmented with retrieval block when matches exist
     expect(capture.systemPrompt).toContain('Retrieved Knowledge');
+  });
+
+  it('Test 6b — keyword-only semantic query still works (R12 idempotent on clean input)', async () => {
+    await agent.chat('HR escalation payroll');
+    const meta = agent.getLastRetrievalMetadata()!;
+    expect(meta.retrievalIntent).toBe('SEMANTIC');
+    expect(meta.retrievalDocuments.map(d => d.file_name)).toContain('grievance_robert_moyes.pdf');
   });
 
   it('Test 7 — no-match exact query → EXACT_SEARCH, 0 matches, no crash', async () => {

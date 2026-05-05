@@ -8,6 +8,7 @@ import { EntityIndexService } from '../entities/entity-index-service.js';
 import { DocumentRegistry } from '../memory/document-registry.js';
 import type { QueryIntent, RetrievalResult, DocumentMetadata, DocumentChunk } from '../memory/types.js';
 import { generateId } from '../memory/id-generator.js';
+import { normalizeSemanticQuery } from './semantic-query-normalizer.js';
 
 const log = createLogger('retrieval:service');
 
@@ -305,7 +306,14 @@ export class RetrievalService {
   }
 
   private async handleSemanticSearch(query: string, topK: number): Promise<RetrievalResult[]> {
-    const ftsResults = this.ftsIndex.searchChunks(query, topK);
+    // R12: normalize the query for chunk-FTS lookup. Strips stop words
+    // (e.g. "what", "documents", "are", "about", "issues") that no chunk
+    // contains, so FTS5's default AND-of-tokens doesn't return zero rows
+    // for natural-language questions. The original query is preserved
+    // everywhere else (prompts, metadata, logging).
+    const normalised = normalizeSemanticQuery(query);
+    const searchQuery = normalised.length > 0 ? normalised : query;
+    const ftsResults = this.ftsIndex.searchChunks(searchQuery, topK);
 
     const results: RetrievalResult[] = [];
     const seenDocs = new Set<string>();
