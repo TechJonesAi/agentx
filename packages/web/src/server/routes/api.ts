@@ -175,6 +175,30 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // ─── R11: Chat Feedback ─────────────────────────────────────────
+        if (route === '/api/chat/feedback' && method === 'POST') {
+          let body: Record<string, unknown>;
+          try {
+            body = await parseBody(req);
+          } catch {
+            sendJson(res, 400, { error: 'Invalid JSON body' });
+            return;
+          }
+          try {
+            const recordFn = (agent as unknown as { recordFeedback?: (p: unknown) => unknown }).recordFeedback;
+            if (typeof recordFn !== 'function') {
+              sendJson(res, 501, { error: 'Feedback not supported by this agent build' });
+              return;
+            }
+            const record = recordFn.call(agent, body);
+            sendJson(res, 200, { ok: true, feedback: record });
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            sendJson(res, 400, { error: msg });
+          }
+          return;
+        }
+
         // ─── Sessions ───────────────────────────────────────────────────
         if (route === '/api/sessions' && method === 'GET') {
           const store = agent.getSessionStore();

@@ -44,6 +44,7 @@ import { DocumentRegistry } from './memory/document-registry.js';
 import type { QueryIntent, RetrievalResult } from './memory/types.js';
 import type { RetrievalMetadata, RetrievalMetadataDocument } from './types.js';
 import { EntityIngestionService, type EntityIngestionResult } from './entities/entity-ingestion-service.js';
+import { FeedbackStore, type FeedbackPayload, type FeedbackRecord } from './memory/feedback-store.js';
 
 const log = createLogger('agent');
 
@@ -120,6 +121,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _lastRetrievalStats: { intent: string; source: string; matchCount: number; elapsedMs: number } | null = null;
   private _lastRetrievalError: string | null = null;
 
+  // R11: feedback store (always available, no flag)
+  private _feedbackStore: FeedbackStore;
+
   constructor(configPath?: string) {
     super();
 
@@ -127,6 +131,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     const dataDir = ensureDataDir();
 
     this.db = createDatabase(dataDir);
+    this._feedbackStore = new FeedbackStore(this.db); // R11: always available
     this.provider = createProvider(this.config.agent.defaultProvider, this.config);
     this.toolRegistry = new ToolRegistry();
     this.conversationMemory = new ConversationMemory(
@@ -453,6 +458,15 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   }
   /** R10: error message from the last retrieval failure (null on success / disabled). */
   getLastRetrievalError(): string | null { return this._lastRetrievalError; }
+
+  /** R11: record a thumbs-up/down on a chat response. Validates payload — throws on bad input. */
+  recordFeedback(payload: FeedbackPayload): FeedbackRecord {
+    return this._feedbackStore.record(payload);
+  }
+  /** R11: list recent feedback records (newest first). */
+  listFeedback(limit = 100): FeedbackRecord[] { return this._feedbackStore.list(limit); }
+  /** R11: total feedback row count. */
+  feedbackCount(): number { return this._feedbackStore.count(); }
 
   /**
    * R5: Ingest entity mentions for a document. Removes any pre-existing

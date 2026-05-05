@@ -180,6 +180,15 @@ export function getEmbeddedHtml(): string {
     .source-chip .chip-type { color: #4ecca3; text-transform: uppercase; font-size: 9px; padding: 1px 4px; background: #0a1a2e; border-radius: 3px; }
     .source-chip .chip-snippet { color: #c0c8d0; font-size: 11px; line-height: 1.4; max-width: 100%; overflow-wrap: anywhere; }
     .source-chip .chip-snippet mark.match { background: #ffc857; color: #1a1a2e; padding: 0 2px; border-radius: 2px; font-weight: 600; }
+    /* R11: feedback buttons */
+    .feedback-bar { margin-top: 8px; display: flex; gap: 6px; align-items: center; font-size: 11px; }
+    .feedback-btn { background: transparent; color: #888; border: 1px solid #0f3460; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .feedback-btn:hover { color: #e0e0e0; border-color: #4ecca3; }
+    .feedback-btn.active { background: #0f3460; color: #4ecca3; border-color: #4ecca3; }
+    .feedback-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .feedback-comment { margin-top: 6px; display: flex; gap: 6px; }
+    .feedback-comment input { flex: 1; background: #0a1a2e; border: 1px solid #0f3460; color: #e0e0e0; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+    .feedback-status { color: #4ecca3; font-size: 11px; margin-left: 8px; }
   </style>
 </head>
 <body>
@@ -263,12 +272,20 @@ export function getEmbeddedHtml(): string {
       addMessage('user', text);
       document.getElementById('sendBtn').disabled = true;
 
+      // R11: a per-message id used for feedback correlation
+      const messageId = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+
       // Create a streaming assistant message placeholder
       const msgDiv = document.createElement('div');
       msgDiv.className = 'message assistant';
+      msgDiv.dataset.messageId = messageId;
       msgDiv.innerHTML = '<div class="role">assistant</div><span class="stream-content"></span>';
       document.getElementById('messages').appendChild(msgDiv);
       const contentSpan = msgDiv.querySelector('.stream-content');
+
+      // R11: feedback metadata captured during streaming
+      let lastRetrievalForFeedback = null;
+      const userQueryForFeedback = text;
 
       try {
         const res = await apiFetch('/api/chat/stream', {
@@ -309,6 +326,8 @@ export function getEmbeddedHtml(): string {
                   const panel = wrap.firstElementChild;
                   if (panel) msgDiv.parentElement.insertBefore(panel, msgDiv);
                 }
+                // R11: snapshot metadata for the feedback payload
+                lastRetrievalForFeedback = event.retrieval || null;
               } else if (event.type === 'token') {
                 fullContent += event.content;
                 contentSpan.textContent = fullContent;
@@ -332,8 +351,97 @@ export function getEmbeddedHtml(): string {
       } catch (err) {
         contentSpan.textContent = 'Error: ' + err.message;
       }
+
+      // R11: attach feedback bar to this assistant message (only when there's content)
+      if (contentSpan.textContent && contentSpan.textContent.length > 0) {
+        attachFeedbackBar(msgDiv, {
+          messageId: messageId,
+          userQuery: userQueryForFeedback,
+          assistantResponse: contentSpan.textContent,
+          retrieval: lastRetrievalForFeedback,
+          sessionId: sessionId,
+        });
+      }
+
       document.getElementById('sendBtn').disabled = false;
       input.focus();
+    }
+
+    // R11: feedback UI helpers
+    function attachFeedbackBar(messageDiv, ctx) {
+      const bar = document.createElement('div');
+      bar.className = 'feedback-bar';
+      bar.innerHTML =
+        '<button class="feedback-btn fb-up" type="button" aria-label="Thumbs up">👍</button>' +
+        '<button class="feedback-btn fb-down" type="button" aria-label="Thumbs down">👎</button>' +
+        '<span class="feedback-status"></span>';
+      messageDiv.appendChild(bar);
+      const upBtn = bar.querySelector('.fb-up');
+      const downBtn = bar.querySelector('.fb-down');
+      const status = bar.querySelector('.feedback-status');
+
+      function setSubmitted(rating) {
+        upBtn.disabled = true; downBtn.disabled = true;
+        if (rating === 'up') upBtn.classList.add('active');
+        if (rating === 'down') downBtn.classList.add('active');
+        status.textContent = 'Thanks for the feedback';
+      }
+
+      upBtn.addEventListener('click', async () => {
+        await submitFeedback(ctx, 'up', null, status, () => setSubmitted('up'));
+      });
+      downBtn.addEventListener('click', async () => {
+        // Inline comment box for downvote
+        const wrap = document.createElement('div');
+        wrap.className = 'feedback-comment';
+        wrap.innerHTML =
+          '<input type="text" placeholder="What was wrong? (optional)" maxlength="500">' +
+          '<button class="feedback-btn" type="button">Send</button>';
+        messageDiv.appendChild(wrap);
+        const inputEl = wrap.querySelector('input');
+        const sendBtnEl = wrap.querySelector('button');
+        inputEl.focus();
+        sendBtnEl.addEventListener('click', async () => {
+          const comment = inputEl.value.trim();
+          await submitFeedback(ctx, 'down', comment || undefined, status, () => {
+            setSubmitted('down');
+            wrap.remove();
+          });
+        });
+        inputEl.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') sendBtnEl.click();
+        });
+      });
+    }
+
+    async function submitFeedback(ctx, rating, comment, status, onSuccess) {
+      try {
+        const payload = {
+          messageId: ctx.messageId,
+          userQuery: ctx.userQuery,
+          assistantResponse: ctx.assistantResponse,
+          rating: rating,
+        };
+        if (comment) payload.comment = comment;
+        if (ctx.sessionId) payload.sessionId = ctx.sessionId;
+        if (ctx.retrieval) {
+          payload.retrievalIntent = ctx.retrieval.retrievalIntent;
+          payload.retrievalSource = ctx.retrieval.retrievalSource;
+          payload.retrievalMatchCount = ctx.retrieval.retrievalMatchCount;
+          if (Array.isArray(ctx.retrieval.retrievalDocuments)) {
+            payload.retrievalDocumentIds = ctx.retrieval.retrievalDocuments.map(d => d.document_id).filter(Boolean);
+          }
+        }
+        const r = await apiFetch('/api/chat/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (r.ok) onSuccess();
+        else status.textContent = 'Feedback failed';
+      } catch (err) {
+        status.textContent = 'Feedback error: ' + err.message;
+      }
     }
 
     function addMessage(role, content) {
