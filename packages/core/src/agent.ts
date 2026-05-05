@@ -329,10 +329,8 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         }
       }
 
-      const source: RetrievalMetadata['retrievalSource'] =
-        r.intent === 'COUNT' ? 'sql' :
-        r.intent === 'EXACT_SEARCH' || r.intent === 'FILTERED_SEARCH' ? 'fts' :
-        r.intent === 'SEMANTIC' ? 'vector' : 'mixed';
+      // R4: source is now reported by RetrievalService itself (covers entity vs fts).
+      const source: RetrievalMetadata['retrievalSource'] = r.source as RetrievalMetadata['retrievalSource'];
 
       this._lastRetrievalMetadata = {
         retrievalIntent: r.intent as RetrievalMetadata['retrievalIntent'],

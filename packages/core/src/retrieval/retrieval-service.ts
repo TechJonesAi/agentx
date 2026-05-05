@@ -17,9 +17,12 @@ export interface RetrievalOptions {
   sessionId?: string;
 }
 
+export type RetrievalSource = 'sql' | 'entity' | 'fts' | 'vector' | 'mixed';
+
 export interface RetrievalResponse {
   logId: string;
   intent: QueryIntent;
+  source: RetrievalSource;
   results: RetrievalResult[];
   executionMs: number;
 }
@@ -49,7 +52,8 @@ export class RetrievalService {
     const logId = generateId('retrieval');
 
     try {
-      const results = await this.executeRetrieval(intent, query, options.topK || 10);
+      const sourceInfo: { source: RetrievalSource } = { source: 'fts' };
+      const results = await this.executeRetrieval(intent, query, options.topK || 10, sourceInfo);
       const executionMs = Date.now() - startTime;
 
       this.logger.logRetrieval({
@@ -68,6 +72,7 @@ export class RetrievalService {
       return {
         logId,
         intent,
+        source: sourceInfo.source,
         results,
         executionMs,
       };
@@ -77,17 +82,21 @@ export class RetrievalService {
     }
   }
 
-  private async executeRetrieval(intent: QueryIntent, query: string, topK: number): Promise<RetrievalResult[]> {
+  private async executeRetrieval(intent: QueryIntent, query: string, topK: number, sourceInfo: { source: RetrievalSource }): Promise<RetrievalResult[]> {
     switch (intent) {
       case 'COUNT':
+        sourceInfo.source = 'sql';
         return this.handleCountQuery(query);
       case 'EXACT_SEARCH':
-        return this.handleExactSearch(query, topK);
+        return this.handleExactSearch(query, topK, sourceInfo);
       case 'FILTERED_SEARCH':
+        sourceInfo.source = 'fts';
         return this.handleFilteredSearch(query, topK);
       case 'SEMANTIC':
+        sourceInfo.source = 'vector';
         return this.handleSemanticSearch(query, topK);
       case 'ANALYTICAL':
+        sourceInfo.source = 'mixed';
         return this.handleAnalyticalQuery(query, topK);
       default:
         return [];
@@ -188,17 +197,59 @@ export class RetrievalService {
     return query.replace(/^["']|["']$/g, '').trim();
   }
 
-  private handleExactSearch(query: string, topK: number): RetrievalResult[] {
+  /**
+   * R4: exact-search routes through EntityIndexService FIRST when entity
+   * matches exist (preferred — entity index has structured per-document
+   * mention data), then falls back to FTS5 phrase search.
+   *
+   * The 'isAllMatchQuery' cap-lift from R1.5 applies to BOTH paths so
+   * "show all references to X" returns every match regardless of which
+   * source produced them.
+   */
+  private handleExactSearch(query: string, topK: number, sourceInfo: { source: RetrievalSource }): RetrievalResult[] {
     const phrase = this.extractExactSearchPhrase(query);
-    // R1.5: lift the topK cap when the query explicitly asks for "all references"
     const limit = this.isAllMatchQuery(query) ? 10_000 : topK;
-    const ftsResults = this.ftsIndex.phraseSearch(phrase, limit);
 
+    // 1) Try entity index first
+    const entities = this.entityIndex.searchEntitiesByNormalized(phrase.toLowerCase());
+    if (entities.length > 0) {
+      const seen = new Set<string>();
+      const results: RetrievalResult[] = [];
+      for (const entity of entities) {
+        const mentions = this.entityIndex.getMentionsByEntity(entity.entity_id);
+        for (const m of mentions) {
+          if (seen.has(m.document_id)) continue;
+          seen.add(m.document_id);
+          const doc = this.registry.get(m.document_id);
+          if (!doc) continue;
+          results.push({
+            result_id: generateId('result'),
+            log_id: '',
+            document_id: doc.document_id,
+            chunk_id: m.chunk_id,
+            rank: results.length + 1,
+            score: 1.0,
+            score_type: 'entity_match',
+            matched_field: 'entity_mention',
+            created_at: Date.now(),
+          });
+          if (results.length >= limit) break;
+        }
+        if (results.length >= limit) break;
+      }
+      if (results.length > 0) {
+        sourceInfo.source = 'entity';
+        return this.aggregator.deduplicate(results);
+      }
+    }
+
+    // 2) Fall back to FTS5 phrase search
+    sourceInfo.source = 'fts';
+    const ftsResults = this.ftsIndex.phraseSearch(phrase, limit);
     const results: RetrievalResult[] = [];
     for (let rank = 0; rank < ftsResults.length; rank++) {
       const ftsResult = ftsResults[rank];
       const doc = this.registry.get(ftsResult.document_id);
-
       if (doc) {
         results.push({
           result_id: generateId('result'),
@@ -212,7 +263,6 @@ export class RetrievalService {
         });
       }
     }
-
     return this.aggregator.deduplicate(results);
   }
 
