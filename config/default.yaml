@@ -6,6 +6,8 @@ agent:
     enabled: false
     observationOnly: true
     influenceMode: off
+  retrieval:
+    enabled: false
 
 providers:
   anthropic:

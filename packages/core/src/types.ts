@@ -236,6 +236,9 @@ export interface AgentConfig {
       observationOnly: boolean;
       influenceMode?: 'off' | 'force-reasoning';
     };
+    retrieval?: {
+      enabled: boolean;
+    };
   };
   providers: {
     anthropic?: { model: string; maxTokens: number };

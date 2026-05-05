@@ -37,6 +37,10 @@ import { DomainClassifier } from './reasoning/domain-classifier.js';
 import { KnowledgeProbe } from './reasoning/knowledge-probe.js';
 import { detectRedFlag, type RedFlagResult } from './reasoning/redflag-gate.js';
 import { DecisionEngine, type DecisionEngineInput, type DecisionSummary, type ExecutionTrace } from './reasoning/decision-engine.js';
+import { RetrievalService } from './retrieval/retrieval-service.js';
+import { runCognitiveMemoryMigrations } from './db/migrations/index.js';
+import { DocumentRegistry } from './memory/document-registry.js';
+import type { QueryIntent, RetrievalResult } from './memory/types.js';
 
 const log = createLogger('agent');
 
@@ -95,6 +99,12 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _lastExecutionTrace: ExecutionTrace | null = null;
   private _lastRedFlag: RedFlagResult | null = null;
   private _lastForceReasoning = false;
+
+  // R2: Retrieval integration
+  private _retrievalEnabled = false;
+  private _retrievalService: RetrievalService | null = null;
+  private _lastRetrievalIntent: QueryIntent | null = null;
+  private _lastRetrievalResults: RetrievalResult[] = [];
 
   constructor(configPath?: string) {
     super();
@@ -227,6 +237,13 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       });
     }
 
+    // R2: Initialize retrieval integration if enabled
+    if (this.config.agent.retrieval?.enabled) {
+      runCognitiveMemoryMigrations(this.db);
+      this._retrievalEnabled = true;
+      this._retrievalService = new RetrievalService(this.db);
+    }
+
     // Phase 4/5: Initialize intelligence observation + optional influence
     const intel = this.config.agent.intelligence;
     if (intel?.enabled) {
@@ -278,6 +295,47 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getLastExecutionTrace(): ExecutionTrace | null { return this._lastExecutionTrace; }
   getLastRedFlag(): RedFlagResult | null { return this._lastRedFlag; }
   getLastForceReasoning(): boolean | null { return this._intelligenceEnabled ? this._lastForceReasoning : null; }
+
+  // R2: Retrieval wiring — runs RetrievalService for the user's query and
+  // returns a system-prompt fragment that injects deterministic facts (counts,
+  // exact-match document IDs, semantic excerpts) tagged by source.
+  // Returns null when the feature flag is off — in that case nothing is appended
+  // and the LLM call is bit-identical to the pre-R2 path.
+  private async _buildRetrievalContext(input: string): Promise<string | null> {
+    if (!this._retrievalEnabled || !this._retrievalService) return null;
+    try {
+      const r = await this._retrievalService.retrieve(input);
+      this._lastRetrievalIntent = r.intent;
+      this._lastRetrievalResults = r.results;
+      if (r.intent === 'COUNT') {
+        const filters = this._retrievalService.parseCountFilters(input);
+        const filterDesc = Object.keys(filters).length > 0
+          ? Object.entries(filters).map(([k, v]) => `${k}=${v}`).join(', ')
+          : 'all documents';
+        const n = r.results[0]?.score ?? 0;
+        return `\n\n--- Retrieved Facts (sql:documents) ---\nDOCUMENT COUNT (${filterDesc}): ${n}\nThis count is authoritative — it was computed from SQL, not estimated.\n--- End Retrieved Facts ---`;
+      }
+      if (r.results.length === 0) return null;
+      const reg = new DocumentRegistry(this.db);
+      const lines: string[] = [];
+      for (const res of r.results.slice(0, 50)) {
+        if (!res.document_id) continue;
+        const doc = reg.get(res.document_id);
+        if (!doc) continue;
+        lines.push(`- [${doc.document_id}] ${doc.file_name}${doc.title ? ` — ${doc.title}` : ''}${doc.sender ? ` (sender: ${doc.sender})` : ''}`);
+      }
+      const intentLabel = r.intent === 'EXACT_SEARCH' ? 'Exact-match Documents' :
+                          r.intent === 'SEMANTIC' ? 'Semantically-relevant Documents' :
+                          r.intent === 'FILTERED_SEARCH' ? 'Filtered Documents' : 'Documents';
+      return `\n\n--- Retrieved Knowledge (${intentLabel}, ${r.results.length} matches) ---\n${lines.join('\n')}\n--- End Retrieved Knowledge ---`;
+    } catch (error) {
+      log.warn({ error }, 'R2: retrieval context build failed; continuing without it');
+      return null;
+    }
+  }
+
+  getLastRetrievalIntent(): QueryIntent | null { return this._lastRetrievalIntent; }
+  getLastRetrievalResults(): RetrievalResult[] { return this._lastRetrievalResults; }
 
   private registerBuiltinTools(): void {
     for (const tool of getBuiltinTools()) {
@@ -593,11 +651,14 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
     this._runIntelligenceObservation(input);
 
+    const retrievalContext = await this._buildRetrievalContext(input);
+    const augmentedSystemPrompt = retrievalContext ? this.systemPrompt + retrievalContext : this.systemPrompt;
+
     let response: LLMResponse;
     try {
       response = await this.completeWithResilience({
         messages,
-        systemPrompt: this.systemPrompt,
+        systemPrompt: augmentedSystemPrompt,
         tools: toolDefs.length > 0 ? toolDefs : undefined,
         ...(this._resolveModelHint() ?? {}),
       });
@@ -782,13 +843,16 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
     this._runIntelligenceObservation(input);
 
+    const retrievalContextStream = await this._buildRetrievalContext(input);
+    const augmentedSystemPromptStream = retrievalContextStream ? this.systemPrompt + retrievalContextStream : this.systemPrompt;
+
     // First response: stream it
     let response: LLMResponse;
     try {
       response = await this.provider.completeStream(
         {
           messages,
-          systemPrompt: this.systemPrompt,
+          systemPrompt: augmentedSystemPromptStream,
           tools: toolDefs.length > 0 ? toolDefs : undefined,
           ...(this._resolveModelHint() ?? {}),
         },
