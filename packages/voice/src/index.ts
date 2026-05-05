@@ -138,5 +138,95 @@ export class VoiceManager {
   }
 }
 
+// ─── Local Whisper STT (PCM buffer input for WebUI push-to-talk) ──────────────
+
+export interface WhisperConfig {
+  sampleRate?: number;
+  language?: string;
+  useGPU?: boolean;
+}
+
+export interface WhisperResult {
+  success: boolean;
+  text: string;
+  error?: string;
+  durationMs?: number;
+}
+
+/**
+ * Local Whisper STT adapter for web UI push-to-talk.
+ * Accepts PCM audio buffers directly (as opposed to WhisperSTT which takes file paths).
+ * Falls back to the OpenAI Whisper API under the hood, writing the buffer to a temp file.
+ */
+export class Whisper {
+  private config: WhisperConfig;
+  private stt: WhisperSTT;
+
+  constructor(config?: WhisperConfig) {
+    this.config = config ?? {};
+    this.stt = new WhisperSTT();
+  }
+
+  async transcribe(pcmBuffer: Buffer): Promise<WhisperResult> {
+    const startMs = Date.now();
+
+    if (!this.stt.isConfigured()) {
+      return {
+        success: false,
+        text: '',
+        error: 'OpenAI API key not configured for Whisper STT',
+      };
+    }
+
+    // Write PCM to a temp WAV file for the OpenAI API
+    const tmpDir = (await import('node:os')).tmpdir();
+    const tmpPath = (await import('node:path')).join(tmpDir, `agentx-stt-${Date.now()}.wav`);
+
+    try {
+      // Create minimal WAV header for 16kHz 16-bit mono PCM
+      const sampleRate = this.config.sampleRate ?? 16000;
+      const bitsPerSample = 16;
+      const numChannels = 1;
+      const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+      const blockAlign = numChannels * (bitsPerSample / 8);
+      const dataSize = pcmBuffer.length;
+
+      const header = Buffer.alloc(44);
+      header.write('RIFF', 0);
+      header.writeUInt32LE(36 + dataSize, 4);
+      header.write('WAVE', 8);
+      header.write('fmt ', 12);
+      header.writeUInt32LE(16, 16);
+      header.writeUInt16LE(1, 20);           // PCM format
+      header.writeUInt16LE(numChannels, 22);
+      header.writeUInt32LE(sampleRate, 24);
+      header.writeUInt32LE(byteRate, 28);
+      header.writeUInt16LE(blockAlign, 32);
+      header.writeUInt16LE(bitsPerSample, 34);
+      header.write('data', 36);
+      header.writeUInt32LE(dataSize, 40);
+
+      const wavBuffer = Buffer.concat([header, pcmBuffer]);
+      (await import('node:fs')).writeFileSync(tmpPath, wavBuffer);
+
+      const text = await this.stt.transcribe({
+        audioPath: tmpPath,
+        language: this.config.language,
+      });
+
+      const durationMs = Date.now() - startMs;
+      return { success: true, text, durationMs };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return { success: false, text: '', error: msg, durationMs: Date.now() - startMs };
+    } finally {
+      // Clean up temp file
+      try {
+        (await import('node:fs')).unlinkSync(tmpPath);
+      } catch { /* ignore cleanup errors */ }
+    }
+  }
+}
+
 // Re-export voice call support
 export { VoiceCaller, createPhoneCallTool, type VoiceCallConfig, type CallResult } from './calls.js';
