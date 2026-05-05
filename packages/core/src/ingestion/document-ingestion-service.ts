@@ -7,6 +7,7 @@ import { TextExtractorFactory } from './text-extractors.js';
 import { DocumentClassifier } from '../classification/document-classifier.js';
 import { EntityExtractor } from '../entities/entity-extractor.js';
 import { EntityIndexService } from '../entities/entity-index-service.js';
+import { EntityIngestionService } from '../entities/entity-ingestion-service.js';
 import { FtsIndexService } from '../memory/fts-index-service.js';
 import { createHash } from 'node:crypto';
 
@@ -15,6 +16,9 @@ const log = createLogger('ingestion:service');
 export interface IngestionConfig {
   maxFileSizeBytes: number;
   enableOCR: boolean;
+  /** R5.5: gate entity-index population. Default false — preserves prior
+   *  behaviour where entity_mentions are not written from this path. */
+  enableEntityIndexing?: boolean;
 }
 
 export interface IngestionResult {
@@ -33,6 +37,7 @@ export class DocumentIngestionService {
   private classifier: DocumentClassifier;
   private entityExtractor: EntityExtractor;
   private entityIndex: EntityIndexService;
+  private entityIngestion: EntityIngestionService;
   private ftsIndex: FtsIndexService;
   private extractorFactory: TextExtractorFactory;
   private config: IngestionConfig;
@@ -46,6 +51,7 @@ export class DocumentIngestionService {
     this.classifier = new DocumentClassifier();
     this.entityExtractor = new EntityExtractor();
     this.entityIndex = new EntityIndexService(db);
+    this.entityIngestion = new EntityIngestionService(db, this.entityExtractor, this.entityIndex);
     this.ftsIndex = new FtsIndexService(db);
     this.extractorFactory = new TextExtractorFactory();
     this.config = config;
@@ -239,21 +245,22 @@ export class DocumentIngestionService {
     }
   }
 
-  private extractAndIndexEntities(documentId: string, text: string): any[] {
-    const entities = this.entityExtractor.extract(text);
-
-    for (const entity of entities) {
-      this.entityIndex.upsertEntity(entity);
-      this.entityIndex.upsertMention({
-        mention_id: generateId('mention'),
-        entity_id: entity.entity_id,
-        document_id: documentId,
-        mention_text: entity.canonical_form,
-        confidence: entity.confidence,
-      });
-    }
-
-    return entities;
+  /**
+   * R5.5: gated entity ingestion path. Delegates to EntityIngestionService
+   * which (a) deletes stale mentions for the document first so re-ingestion
+   * is idempotent, and (b) writes mentions with the STORED entity_id from
+   * upsertEntity (the prior implementation used the freshly-generated
+   * extractor id which dangled when the canonical_form already existed).
+   *
+   * When `config.enableEntityIndexing` is falsy, this is a no-op — no
+   * entities or mentions are written.
+   */
+  private extractAndIndexEntities(documentId: string, text: string): unknown[] {
+    if (!this.config.enableEntityIndexing) return [];
+    const result = this.entityIngestion.ingestDocument(documentId, text);
+    // Return an array of length=mentionsCreated for callers that read
+    // `entityCount` from `IngestionResult.entityCount = entities.length`.
+    return new Array(result.mentionsCreated).fill(null);
   }
 
   private getFileType(mimeType: string): string {
