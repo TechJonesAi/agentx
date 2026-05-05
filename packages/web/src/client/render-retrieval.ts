@@ -15,6 +15,8 @@ export interface RetrievalMetadataDocumentLike {
   title?: string;
   file_type?: string;
   sender?: string;
+  snippet?: string;
+  matchedPhrase?: string;
 }
 
 export interface RetrievalMetadataLike {
@@ -28,6 +30,21 @@ export interface RetrievalMetadataLike {
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/**
+ * R9: escape `snippet` and wrap (escaped) `matchedPhrase` occurrences in
+ * <mark>. Only the matched phrase is wrapped — everything else is plain
+ * text after escape, so XSS through snippet content is impossible.
+ */
+function renderSnippetSafe(snippet: string, matchedPhrase?: string): string {
+  const escaped = escapeHtml(snippet);
+  if (!matchedPhrase) return escaped;
+  const escapedMatch = escapeHtml(matchedPhrase);
+  if (!escapedMatch || !escaped.includes(escapedMatch)) return escaped;
+  // Replace ALL occurrences of the escaped match with the marked form.
+  // Use a literal split-join so no regex meta-characters are interpreted.
+  return escaped.split(escapedMatch).join(`<mark class="match">${escapedMatch}</mark>`);
 }
 
 /**
@@ -52,10 +69,14 @@ export function renderRetrievalPanelHtml(metadata: RetrievalMetadataLike | null 
       const fn = escapeHtml(String(d.file_name ?? ''));
       const title = d.title ? escapeHtml(String(d.title)) : '';
       const ftype = d.file_type ? escapeHtml(String(d.file_type)) : '';
+      const snippetHtml = d.snippet ? renderSnippetSafe(String(d.snippet), d.matchedPhrase) : '';
       return `<span class="source-chip" data-doc-id="${escapeHtml(String(d.document_id))}">` +
-        `<span class="chip-name">${fn}</span>` +
-        (title ? `<span class="chip-title">${title}</span>` : '') +
-        (ftype ? `<span class="chip-type">${ftype}</span>` : '') +
+        `<span class="chip-row">` +
+          `<span class="chip-name">${fn}</span>` +
+          (title ? `<span class="chip-title">${title}</span>` : '') +
+          (ftype ? `<span class="chip-type">${ftype}</span>` : '') +
+        `</span>` +
+        (snippetHtml ? `<span class="chip-snippet">${snippetHtml}</span>` : '') +
         `</span>`;
     }).join('');
     body = `<div class="retrieval-chips">${chips}</div>`;

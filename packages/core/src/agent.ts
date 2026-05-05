@@ -38,6 +38,7 @@ import { KnowledgeProbe } from './reasoning/knowledge-probe.js';
 import { detectRedFlag, type RedFlagResult } from './reasoning/redflag-gate.js';
 import { DecisionEngine, type DecisionEngineInput, type DecisionSummary, type ExecutionTrace } from './reasoning/decision-engine.js';
 import { RetrievalService } from './retrieval/retrieval-service.js';
+import { extractSnippet } from './retrieval/snippet-extractor.js';
 import { runCognitiveMemoryMigrations } from './db/migrations/index.js';
 import { DocumentRegistry } from './memory/document-registry.js';
 import type { QueryIntent, RetrievalResult } from './memory/types.js';
@@ -332,16 +333,27 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       if (r.intent === 'COUNT') {
         retrievalCount = r.results[0]?.score ?? 0;
       } else {
+        // R9: extract bounded snippets around the matched phrase for each doc.
+        const phrase = (r.intent === 'EXACT_SEARCH' || r.intent === 'FILTERED_SEARCH')
+          ? this._retrievalService.extractExactSearchPhrase(input)
+          : input;
         for (const res of r.results) {
           if (!res.document_id) continue;
           const doc = reg.get(res.document_id);
           if (!doc) continue;
+          // Prefer a specific chunk if the result tagged one; else any chunk for the doc.
+          const chunkRow = res.chunk_id
+            ? this.db.prepare('SELECT content FROM document_chunks WHERE chunk_id = ? LIMIT 1').get(res.chunk_id) as { content: string } | undefined
+            : this.db.prepare('SELECT content FROM document_chunks WHERE document_id = ? ORDER BY chunk_number ASC LIMIT 1').get(res.document_id) as { content: string } | undefined;
+          const { snippet, matchedPhrase } = extractSnippet(chunkRow?.content, phrase);
           documents.push({
             document_id: doc.document_id,
             file_name: doc.file_name,
             title: doc.title,
             file_type: doc.file_type,
             sender: doc.sender,
+            ...(snippet ? { snippet } : {}),
+            ...(matchedPhrase ? { matchedPhrase } : {}),
           });
         }
       }

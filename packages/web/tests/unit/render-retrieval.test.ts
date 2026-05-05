@@ -220,3 +220,127 @@ describe('R7 — flag-off invariant', () => {
     expect(renderRetrievalPanelHtml(undefined)).toBe('');
   });
 });
+
+describe('R9 — snippet rendering with safe highlighting', () => {
+  it('renders a chip-snippet containing the snippet text', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'EXACT_SEARCH',
+      retrievalSource: 'entity',
+      retrievalMatchCount: 1,
+      retrievalDocuments: [{
+        document_id: 'd1',
+        file_name: 'memo.pdf',
+        snippet: '…earlier in the day, Robert Moyes signed the indemnity agreement…',
+        matchedPhrase: 'Robert Moyes',
+      }],
+    });
+    expect(html).toContain('class="chip-snippet"');
+    expect(html).toContain('Robert Moyes');
+  });
+
+  it('wraps the matched phrase in <mark class="match">', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'EXACT_SEARCH',
+      retrievalSource: 'fts',
+      retrievalMatchCount: 1,
+      retrievalDocuments: [{
+        document_id: 'd1', file_name: 'a.pdf',
+        snippet: 'context Robert Moyes context',
+        matchedPhrase: 'Robert Moyes',
+      }],
+    });
+    expect(html).toContain('<mark class="match">Robert Moyes</mark>');
+  });
+
+  it('escapes HTML inside the snippet (XSS guard)', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'EXACT_SEARCH',
+      retrievalSource: 'fts',
+      retrievalMatchCount: 1,
+      retrievalDocuments: [{
+        document_id: 'd1', file_name: 'evil.pdf',
+        snippet: '<script>alert(1)</script> <img onerror=x>',
+      }],
+    });
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).not.toContain('<img onerror=x>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  it('escapes HTML inside matchedPhrase before wrapping', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'EXACT_SEARCH',
+      retrievalSource: 'fts',
+      retrievalMatchCount: 1,
+      retrievalDocuments: [{
+        document_id: 'd1', file_name: 'a.pdf',
+        snippet: 'before <evil> after',
+        matchedPhrase: '<evil>',
+      }],
+    });
+    expect(html).not.toContain('<mark class="match"><evil></mark>');
+    expect(html).toContain('<mark class="match">&lt;evil&gt;</mark>');
+  });
+
+  it('omits chip-snippet when document has no snippet field', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'EXACT_SEARCH',
+      retrievalSource: 'fts',
+      retrievalMatchCount: 1,
+      retrievalDocuments: [{ document_id: 'd1', file_name: 'a.pdf' }],
+    });
+    expect(html).not.toContain('chip-snippet');
+  });
+
+  it('snippet without matchedPhrase still renders (escaped, no <mark>)', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'SEMANTIC',
+      retrievalSource: 'vector',
+      retrievalMatchCount: 1,
+      retrievalDocuments: [{
+        document_id: 'd1', file_name: 'a.pdf',
+        snippet: 'a generic semantic excerpt',
+      }],
+    });
+    expect(html).toContain('class="chip-snippet"');
+    expect(html).toContain('a generic semantic excerpt');
+    expect(html).not.toContain('<mark');
+  });
+
+  it('multiple occurrences of matchedPhrase all wrapped', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'EXACT_SEARCH',
+      retrievalSource: 'mixed',
+      retrievalMatchCount: 1,
+      retrievalDocuments: [{
+        document_id: 'd1', file_name: 'a.pdf',
+        snippet: 'Robert Moyes spoke. Robert Moyes signed. Robert Moyes left.',
+        matchedPhrase: 'Robert Moyes',
+      }],
+    });
+    expect((html.match(/<mark class="match">Robert Moyes<\/mark>/g) ?? []).length).toBe(3);
+  });
+
+  it('embedded HTML mirrors snippet rendering with mark wrapper', () => {
+    expect(SERVER_TS).toContain('chip-snippet');
+    expect(SERVER_TS).toContain('mark class="match"');
+    expect(SERVER_TS).toContain('split(escMatch).join');
+  });
+
+  it('embedded HTML mirrors split-join (no regex) replacement', () => {
+    // Confirm we do NOT use regex on attacker-controlled phrase data
+    expect(SERVER_TS).not.toMatch(/new RegExp\(.*matchedPhrase/);
+  });
+
+  it('COUNT intent never renders chip-snippet (no documents to attach to)', () => {
+    const html = renderRetrievalPanelHtml({
+      retrievalIntent: 'COUNT',
+      retrievalSource: 'sql',
+      retrievalMatchCount: 7,
+      retrievalCount: 7,
+      retrievalDocuments: [],
+    });
+    expect(html).not.toContain('chip-snippet');
+    expect(html).not.toContain('<mark');
+  });
+});

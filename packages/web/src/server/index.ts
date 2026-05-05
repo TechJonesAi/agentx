@@ -173,10 +173,13 @@ export function getEmbeddedHtml(): string {
     .retrieval-badge.count { background: transparent; color: #888; }
     .retrieval-count { margin-top: 6px; font-size: 14px; color: #4ecca3; }
     .retrieval-chips { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
-    .source-chip { background: #0f3460; padding: 3px 8px; border-radius: 4px; font-size: 11px; display: inline-flex; gap: 6px; align-items: baseline; }
+    .source-chip { background: #0f3460; padding: 4px 8px; border-radius: 4px; font-size: 11px; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; max-width: 100%; }
+    .source-chip .chip-row { display: inline-flex; gap: 6px; align-items: baseline; }
     .source-chip .chip-name { color: #e0e0e0; font-weight: 500; }
     .source-chip .chip-title { color: #888; font-style: italic; }
     .source-chip .chip-type { color: #4ecca3; text-transform: uppercase; font-size: 9px; padding: 1px 4px; background: #0a1a2e; border-radius: 3px; }
+    .source-chip .chip-snippet { color: #c0c8d0; font-size: 11px; line-height: 1.4; max-width: 100%; overflow-wrap: anywhere; }
+    .source-chip .chip-snippet mark.match { background: #ffc857; color: #1a1a2e; padding: 0 2px; border-radius: 2px; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -220,10 +223,26 @@ export function getEmbeddedHtml(): string {
           const fn = escapeHtml(String(d.file_name || ''));
           const title = d.title ? escapeHtml(String(d.title)) : '';
           const ftype = d.file_type ? escapeHtml(String(d.file_type)) : '';
+          // R9: snippet — escape, then highlight matched phrase via literal split-join (no regex)
+          let snippetHtml = '';
+          if (d.snippet) {
+            const escSnip = escapeHtml(String(d.snippet));
+            if (d.matchedPhrase) {
+              const escMatch = escapeHtml(String(d.matchedPhrase));
+              snippetHtml = (escMatch && escSnip.indexOf(escMatch) >= 0)
+                ? escSnip.split(escMatch).join('<mark class="match">' + escMatch + '</mark>')
+                : escSnip;
+            } else {
+              snippetHtml = escSnip;
+            }
+          }
           return '<span class="source-chip" data-doc-id="' + escapeHtml(String(d.document_id || '')) + '">' +
-            '<span class="chip-name">' + fn + '</span>' +
-            (title ? '<span class="chip-title">' + title + '</span>' : '') +
-            (ftype ? '<span class="chip-type">' + ftype + '</span>' : '') +
+            '<span class="chip-row">' +
+              '<span class="chip-name">' + fn + '</span>' +
+              (title ? '<span class="chip-title">' + title + '</span>' : '') +
+              (ftype ? '<span class="chip-type">' + ftype + '</span>' : '') +
+            '</span>' +
+            (snippetHtml ? '<span class="chip-snippet">' + snippetHtml + '</span>' : '') +
             '</span>';
         }).join('');
         body = '<div class="retrieval-chips">' + chips + '</div>';

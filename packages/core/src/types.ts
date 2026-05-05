@@ -55,6 +55,10 @@ export interface RetrievalMetadataDocument {
   title?: string;
   file_type?: string;
   sender?: string;
+  /** R9: bounded excerpt around the matched phrase (≤ ~240 chars). Plain text. */
+  snippet?: string;
+  /** R9: the phrase to highlight inside `snippet` (case preserved from source). */
+  matchedPhrase?: string;
 }
 
 export interface RetrievalMetadata {
