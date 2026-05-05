@@ -120,7 +120,43 @@ export function loadConfig(configPath?: string): AgentConfig {
     }
   }
 
-  return deepMerge(DEFAULT_CONFIG as unknown as Record<string, unknown>, fileConfig as unknown as Record<string, unknown>) as unknown as AgentConfig;
+  const merged = deepMerge(DEFAULT_CONFIG as unknown as Record<string, unknown>, fileConfig as unknown as Record<string, unknown>) as unknown as AgentConfig;
+  return applyEnvOverrides(merged);
+}
+
+/**
+ * R8: parse a string env value as a boolean. Recognised forms (case-insensitive,
+ * trimmed): true | 1 | yes | on  → true; false | 0 | no | off → false.
+ * Anything else (including empty, whitespace, "maybe") returns undefined —
+ * the caller treats undefined as "no override, use config value" so invalid
+ * env values fail closed: a feature that's `false` in config stays `false`.
+ */
+export function parseBoolEnv(raw: string | undefined): boolean | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const v = String(raw).toLowerCase().trim();
+  if (v === 'true' || v === '1' || v === 'yes' || v === 'on') return true;
+  if (v === 'false' || v === '0' || v === 'no' || v === 'off') return false;
+  return undefined;
+}
+
+/**
+ * R8: apply environment-variable overrides for selected feature flags.
+ *   - AGENT_RETRIEVAL_ENABLED        → agent.retrieval.enabled
+ *   - AGENT_ENTITY_INDEXING_ENABLED  → agent.entityIndexing.enabled
+ * Invalid values are ignored (config-file value wins).
+ */
+export function applyEnvOverrides(config: AgentConfig): AgentConfig {
+  const retrievalEnv = parseBoolEnv(process.env['AGENT_RETRIEVAL_ENABLED']);
+  if (retrievalEnv !== undefined) {
+    if (!config.agent.retrieval) config.agent.retrieval = { enabled: false };
+    config.agent.retrieval.enabled = retrievalEnv;
+  }
+  const entityEnv = parseBoolEnv(process.env['AGENT_ENTITY_INDEXING_ENABLED']);
+  if (entityEnv !== undefined) {
+    if (!config.agent.entityIndexing) config.agent.entityIndexing = { enabled: false };
+    config.agent.entityIndexing.enabled = entityEnv;
+  }
+  return config;
 }
 
 function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {

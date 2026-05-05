@@ -2,7 +2,7 @@
 export { Agent } from './agent.js';
 
 // Configuration
-export { loadConfig, ensureDataDir, resolveDataDir } from './config.js';
+export { loadConfig, ensureDataDir, resolveDataDir, parseBoolEnv, applyEnvOverrides } from './config.js';
 
 // LLM Providers
 export { BaseLLMProvider, AnthropicProvider, OpenAIProvider, OllamaProvider, createProvider } from './llm/index.js';

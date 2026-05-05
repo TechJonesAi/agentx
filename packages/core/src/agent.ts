@@ -274,7 +274,12 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       this._decisionEngine = new DecisionEngine();
     }
 
-    log.info({ provider: this.config.agent.defaultProvider }, 'Agent initialized');
+    log.info({
+      provider: this.config.agent.defaultProvider,
+      retrieval: this._retrievalEnabled,
+      entityIndexing: this._entityIndexingEnabled,
+      intelligence: this._intelligenceEnabled,
+    }, 'Agent initialized');
   }
 
   // Phase 4: observation-only orchestration. Pure side-effect on private fields.
