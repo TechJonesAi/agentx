@@ -125,7 +125,7 @@ export class WebServer {
  * Embedded single-page HTML UI.
  * This provides a minimal functional chat interface without any build tooling.
  */
-function getEmbeddedHtml(): string {
+export function getEmbeddedHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -160,6 +160,23 @@ function getEmbeddedHtml(): string {
     .settings-panel .field { margin-bottom: 12px; }
     .settings-panel label { display: block; font-size: 13px; color: #888; margin-bottom: 4px; }
     .settings-panel .value { color: #4ecca3; }
+    /* R7: retrieval metadata panel */
+    .retrieval-panel { background: #1a1a3a; border: 1px solid #0f3460; border-radius: 8px; padding: 8px 12px; margin: 4px 0 12px; max-width: 85%; font-size: 12px; }
+    .retrieval-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; margin-right: 6px; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .retrieval-badge.intent { background: #0f3460; color: #b0c4de; }
+    .retrieval-badge.source { color: #1a1a2e; }
+    .retrieval-badge.source.source-sql { background: #4ecca3; }
+    .retrieval-badge.source.source-entity { background: #ffc857; }
+    .retrieval-badge.source.source-fts { background: #b0c4de; }
+    .retrieval-badge.source.source-vector { background: #c89bff; }
+    .retrieval-badge.source.source-mixed { background: #ff8c69; }
+    .retrieval-badge.count { background: transparent; color: #888; }
+    .retrieval-count { margin-top: 6px; font-size: 14px; color: #4ecca3; }
+    .retrieval-chips { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .source-chip { background: #0f3460; padding: 3px 8px; border-radius: 4px; font-size: 11px; display: inline-flex; gap: 6px; align-items: baseline; }
+    .source-chip .chip-name { color: #e0e0e0; font-weight: 500; }
+    .source-chip .chip-title { color: #888; font-style: italic; }
+    .source-chip .chip-type { color: #4ecca3; text-transform: uppercase; font-size: 9px; padding: 1px 4px; background: #0a1a2e; border-radius: 3px; }
   </style>
 </head>
 <body>
@@ -185,6 +202,39 @@ function getEmbeddedHtml(): string {
   <script>
     let sessionId = null;
     let currentPage = 'chat';
+
+    // R7: pure renderer for retrieval metadata. Mirrors
+    //     packages/web/src/client/render-retrieval.ts (renderRetrievalPanelHtml).
+    function renderRetrievalPanel(metadata) {
+      if (!metadata) return '';
+      const intent = String(metadata.retrievalIntent || '');
+      const source = String(metadata.retrievalSource || '');
+      const count = Number(metadata.retrievalMatchCount || 0);
+      const isCount = metadata.retrievalIntent === 'COUNT';
+      let body = '';
+      if (isCount) {
+        const value = (metadata.retrievalCount !== undefined) ? metadata.retrievalCount : count;
+        body = '<div class="retrieval-count">SQL count: <strong>' + escapeHtml(String(value)) + '</strong></div>';
+      } else if (Array.isArray(metadata.retrievalDocuments) && metadata.retrievalDocuments.length > 0) {
+        const chips = metadata.retrievalDocuments.slice(0, 50).map(function(d) {
+          const fn = escapeHtml(String(d.file_name || ''));
+          const title = d.title ? escapeHtml(String(d.title)) : '';
+          const ftype = d.file_type ? escapeHtml(String(d.file_type)) : '';
+          return '<span class="source-chip" data-doc-id="' + escapeHtml(String(d.document_id || '')) + '">' +
+            '<span class="chip-name">' + fn + '</span>' +
+            (title ? '<span class="chip-title">' + title + '</span>' : '') +
+            (ftype ? '<span class="chip-type">' + ftype + '</span>' : '') +
+            '</span>';
+        }).join('');
+        body = '<div class="retrieval-chips">' + chips + '</div>';
+      }
+      return '<div class="retrieval-panel" data-intent="' + escapeHtml(intent) + '" data-source="' + escapeHtml(source) + '">' +
+        '<span class="retrieval-badge intent">' + escapeHtml(intent) + '</span>' +
+        '<span class="retrieval-badge source source-' + escapeHtml(source) + '">' + escapeHtml(source) + '</span>' +
+        '<span class="retrieval-badge count">' + count + ' match' + (count === 1 ? '' : 'es') + '</span>' +
+        body +
+        '</div>';
+    }
 
     async function sendMessage() {
       const input = document.getElementById('input');
@@ -231,7 +281,16 @@ function getEmbeddedHtml(): string {
             if (!line.startsWith('data: ')) continue;
             try {
               const event = JSON.parse(line.slice(6));
-              if (event.type === 'token') {
+              if (event.type === 'retrieval') {
+                // R7: insert retrieval panel BEFORE the assistant message
+                const panelHtml = renderRetrievalPanel(event.retrieval);
+                if (panelHtml) {
+                  const wrap = document.createElement('div');
+                  wrap.innerHTML = panelHtml;
+                  const panel = wrap.firstElementChild;
+                  if (panel) msgDiv.parentElement.insertBefore(panel, msgDiv);
+                }
+              } else if (event.type === 'token') {
                 fullContent += event.content;
                 contentSpan.textContent = fullContent;
                 document.getElementById('main').scrollTop = document.getElementById('main').scrollHeight;
