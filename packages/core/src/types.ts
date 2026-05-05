@@ -262,6 +262,10 @@ export interface AgentConfig {
     };
     retrieval?: {
       enabled: boolean;
+      /** R10: hard timeout for retrieve() — fails closed on slow SQL/IO. Default 5000ms. */
+      timeoutMs?: number;
+      /** R10: cap on documents in retrieval metadata payload. Default 50. */
+      maxMetadataDocs?: number;
     };
     entityIndexing?: {
       enabled: boolean;

@@ -114,6 +114,12 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _entityIndexingEnabled = false;
   private _entityIngestionService: EntityIngestionService | null = null;
 
+  // R10: retrieval safety + observability
+  private _retrievalTimeoutMs = 5000;
+  private _retrievalMaxMetadataDocs = 50;
+  private _lastRetrievalStats: { intent: string; source: string; matchCount: number; elapsedMs: number } | null = null;
+  private _lastRetrievalError: string | null = null;
+
   constructor(configPath?: string) {
     super();
 
@@ -250,6 +256,11 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       runCognitiveMemoryMigrations(this.db);
       this._retrievalEnabled = true;
       this._retrievalService = new RetrievalService(this.db);
+      // R10: read safety knobs (with safe positive-integer defaults)
+      const t = this.config.agent.retrieval.timeoutMs;
+      if (typeof t === 'number' && Number.isFinite(t) && t > 0) this._retrievalTimeoutMs = t;
+      const m = this.config.agent.retrieval.maxMetadataDocs;
+      if (typeof m === 'number' && Number.isFinite(m) && m > 0) this._retrievalMaxMetadataDocs = Math.floor(m);
     }
 
     // R5: Initialize entity ingestion if enabled (independent of retrieval flag)
@@ -316,13 +327,31 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getLastRedFlag(): RedFlagResult | null { return this._lastRedFlag; }
   getLastForceReasoning(): boolean | null { return this._intelligenceEnabled ? this._lastForceReasoning : null; }
 
-  // R2/R3: Retrieval wiring — runs RetrievalService, stores structured
-  // metadata, returns a system-prompt fragment for injection.
-  // Returns null when disabled or when retrieval produces nothing usable.
+  // R2/R3/R10: Retrieval wiring with timeout + bounded metadata + stats logging.
+  // Errors are logged but never propagate — chat must always continue.
   private async _buildRetrievalContext(input: string): Promise<string | null> {
     if (!this._retrievalEnabled || !this._retrievalService) return null;
+
+    // Reset per-call observability so callers see a clean slate before this run.
+    this._lastRetrievalMetadata = null;
+    this._lastRetrievalIntent = null;
+    this._lastRetrievalResults = [];
+    this._lastRetrievalStats = null;
+    this._lastRetrievalError = null;
+
+    const start = Date.now();
     try {
-      const r = await this._retrievalService.retrieve(input);
+      // R10: hard timeout — race against a timer so a stuck SQL call cannot
+      // hang chat forever. On timeout we throw, the catch logs + falls through.
+      const r = await Promise.race([
+        this._retrievalService.retrieve(input),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error('R10: retrieval timed out after ' + this._retrievalTimeoutMs + 'ms')),
+            this._retrievalTimeoutMs,
+          );
+        }),
+      ]);
       this._lastRetrievalIntent = r.intent;
       this._lastRetrievalResults = r.results;
 
@@ -361,13 +390,29 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       // R4: source is now reported by RetrievalService itself (covers entity vs fts).
       const source: RetrievalMetadata['retrievalSource'] = r.source as RetrievalMetadata['retrievalSource'];
 
+      // R10: cap metadata-exposed documents (UI/external payload). The full
+      // result count remains accurate via retrievalMatchCount.
+      const cappedDocs = documents.length > this._retrievalMaxMetadataDocs
+        ? documents.slice(0, this._retrievalMaxMetadataDocs)
+        : documents;
+
       this._lastRetrievalMetadata = {
         retrievalIntent: r.intent as RetrievalMetadata['retrievalIntent'],
         retrievalSource: source,
         retrievalMatchCount: r.intent === 'COUNT' ? (retrievalCount ?? 0) : r.results.length,
-        retrievalDocuments: documents,
+        retrievalDocuments: cappedDocs,
         ...(retrievalCount !== undefined ? { retrievalCount } : {}),
       };
+
+      // R10: per-call stats for observability + perf logging
+      const elapsedMs = Date.now() - start;
+      this._lastRetrievalStats = {
+        intent: String(r.intent),
+        source: String(source),
+        matchCount: this._lastRetrievalMetadata.retrievalMatchCount,
+        elapsedMs,
+      };
+      log.info({ ...this._lastRetrievalStats, exposedDocs: cappedDocs.length }, 'retrieval');
 
       // Build the prompt-injection string
       if (r.intent === 'COUNT') {
@@ -386,7 +431,15 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
                           r.intent === 'FILTERED_SEARCH' ? 'Filtered Documents' : 'Documents';
       return `\n\n--- Retrieved Knowledge (${intentLabel}, ${r.results.length} matches) ---\n${lines.join('\n')}\n--- End Retrieved Knowledge ---`;
     } catch (error) {
-      log.warn({ error }, 'R2: retrieval context build failed; continuing without it');
+      // R10: retrieval failure must NEVER crash chat. Log a safe warning
+      // (no stack trace dump that might include user data), record the
+      // error string for observability, return null so the LLM call
+      // proceeds with the unmodified system prompt.
+      const message = error instanceof Error ? error.message : String(error);
+      this._lastRetrievalError = message;
+      this._lastRetrievalMetadata = null;
+      const elapsedMs = Date.now() - start;
+      log.warn({ message, elapsedMs }, 'retrieval failed — continuing without injected context');
       return null;
     }
   }
@@ -394,6 +447,12 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getLastRetrievalIntent(): QueryIntent | null { return this._lastRetrievalIntent; }
   getLastRetrievalResults(): RetrievalResult[] { return this._lastRetrievalResults; }
   getLastRetrievalMetadata(): RetrievalMetadata | null { return this._lastRetrievalMetadata; }
+  /** R10: stats from the last retrieval invocation (null on disabled / error / timeout). */
+  getLastRetrievalStats(): { intent: string; source: string; matchCount: number; elapsedMs: number } | null {
+    return this._lastRetrievalStats;
+  }
+  /** R10: error message from the last retrieval failure (null on success / disabled). */
+  getLastRetrievalError(): string | null { return this._lastRetrievalError; }
 
   /**
    * R5: Ingest entity mentions for a document. Removes any pre-existing
