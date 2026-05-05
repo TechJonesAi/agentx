@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:unit": "vitest run packages/core/tests/unit",
     "test:integration": "vitest run packages/core/tests/integration",
+    "test:e2e": "vitest run packages/core/tests/e2e",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest"
   },
