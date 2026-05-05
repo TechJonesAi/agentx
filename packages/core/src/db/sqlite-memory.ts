@@ -55,10 +55,24 @@ export class SqliteMemoryDb {
     return transaction(this.db);
   }
 
-  prepare<T extends unknown[] = unknown[]>(
+  /**
+   * Prepare a statement.
+   *
+   * Type parameters:
+   *   - T: tuple type of bind parameters (default: unknown[])
+   *   - R: row type returned by .get/.all (default: unknown)
+   *
+   * The optional second parameter `R` is purely a type hint — it has no
+   * runtime effect. It exists so subsystems lifted from claude/silly-johnson
+   * (learning/, knowledge-flow, baseline-registry, etc.) can declare
+   * `prepare<bind, row>(...)` without needing to be rewritten. Existing
+   * callers with one type parameter remain unchanged because R defaults to
+   * unknown.
+   */
+  prepare<T extends unknown[] = unknown[], R = unknown>(
     sql: string,
-  ): Database.Statement<T> {
-    return this.db.prepare(sql) as Database.Statement<T>;
+  ): Database.Statement<T, R> {
+    return this.db.prepare(sql) as Database.Statement<T, R>;
   }
 
   exec(sql: string): void {
