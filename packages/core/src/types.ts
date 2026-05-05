@@ -49,11 +49,31 @@ export interface LLMRequestOptions {
   capability?: 'reasoning';
 }
 
+export interface RetrievalMetadataDocument {
+  document_id: string;
+  file_name: string;
+  title?: string;
+  file_type?: string;
+  sender?: string;
+}
+
+export interface RetrievalMetadata {
+  retrievalIntent: 'COUNT' | 'EXACT_SEARCH' | 'FILTERED_SEARCH' | 'SEMANTIC' | 'ANALYTICAL';
+  retrievalSource: 'sql' | 'fts' | 'vector' | 'mixed';
+  retrievalMatchCount: number;
+  retrievalDocuments: RetrievalMetadataDocument[];
+  /** For COUNT intent only — the SQL-derived numeric answer. */
+  retrievalCount?: number;
+}
+
 export interface StreamCallbacks {
   onToken?: (token: string) => void;
   onToolCall?: (toolCall: ToolCall) => void;
   onComplete?: (response: LLMResponse) => void;
   onError?: (error: Error) => void;
+  /** R3: fired BEFORE any model token streaming begins — only when
+   *  retrieval is enabled and produces a result. */
+  onRetrieval?: (metadata: RetrievalMetadata) => void;
 }
 
 // ─── Tool Types ──────────────────────────────────────────────────────────────

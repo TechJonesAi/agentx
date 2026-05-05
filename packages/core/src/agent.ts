@@ -41,6 +41,7 @@ import { RetrievalService } from './retrieval/retrieval-service.js';
 import { runCognitiveMemoryMigrations } from './db/migrations/index.js';
 import { DocumentRegistry } from './memory/document-registry.js';
 import type { QueryIntent, RetrievalResult } from './memory/types.js';
+import type { RetrievalMetadata, RetrievalMetadataDocument } from './types.js';
 
 const log = createLogger('agent');
 
@@ -100,11 +101,12 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _lastRedFlag: RedFlagResult | null = null;
   private _lastForceReasoning = false;
 
-  // R2: Retrieval integration
+  // R2/R3: Retrieval integration
   private _retrievalEnabled = false;
   private _retrievalService: RetrievalService | null = null;
   private _lastRetrievalIntent: QueryIntent | null = null;
   private _lastRetrievalResults: RetrievalResult[] = [];
+  private _lastRetrievalMetadata: RetrievalMetadata | null = null;
 
   constructor(configPath?: string) {
     super();
@@ -296,34 +298,62 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getLastRedFlag(): RedFlagResult | null { return this._lastRedFlag; }
   getLastForceReasoning(): boolean | null { return this._intelligenceEnabled ? this._lastForceReasoning : null; }
 
-  // R2: Retrieval wiring — runs RetrievalService for the user's query and
-  // returns a system-prompt fragment that injects deterministic facts (counts,
-  // exact-match document IDs, semantic excerpts) tagged by source.
-  // Returns null when the feature flag is off — in that case nothing is appended
-  // and the LLM call is bit-identical to the pre-R2 path.
+  // R2/R3: Retrieval wiring — runs RetrievalService, stores structured
+  // metadata, returns a system-prompt fragment for injection.
+  // Returns null when disabled or when retrieval produces nothing usable.
   private async _buildRetrievalContext(input: string): Promise<string | null> {
     if (!this._retrievalEnabled || !this._retrievalService) return null;
     try {
       const r = await this._retrievalService.retrieve(input);
       this._lastRetrievalIntent = r.intent;
       this._lastRetrievalResults = r.results;
+
+      const reg = new DocumentRegistry(this.db);
+      const documents: RetrievalMetadataDocument[] = [];
+      let retrievalCount: number | undefined = undefined;
+
+      if (r.intent === 'COUNT') {
+        retrievalCount = r.results[0]?.score ?? 0;
+      } else {
+        for (const res of r.results) {
+          if (!res.document_id) continue;
+          const doc = reg.get(res.document_id);
+          if (!doc) continue;
+          documents.push({
+            document_id: doc.document_id,
+            file_name: doc.file_name,
+            title: doc.title,
+            file_type: doc.file_type,
+            sender: doc.sender,
+          });
+        }
+      }
+
+      const source: RetrievalMetadata['retrievalSource'] =
+        r.intent === 'COUNT' ? 'sql' :
+        r.intent === 'EXACT_SEARCH' || r.intent === 'FILTERED_SEARCH' ? 'fts' :
+        r.intent === 'SEMANTIC' ? 'vector' : 'mixed';
+
+      this._lastRetrievalMetadata = {
+        retrievalIntent: r.intent as RetrievalMetadata['retrievalIntent'],
+        retrievalSource: source,
+        retrievalMatchCount: r.intent === 'COUNT' ? (retrievalCount ?? 0) : r.results.length,
+        retrievalDocuments: documents,
+        ...(retrievalCount !== undefined ? { retrievalCount } : {}),
+      };
+
+      // Build the prompt-injection string
       if (r.intent === 'COUNT') {
         const filters = this._retrievalService.parseCountFilters(input);
         const filterDesc = Object.keys(filters).length > 0
           ? Object.entries(filters).map(([k, v]) => `${k}=${v}`).join(', ')
           : 'all documents';
-        const n = r.results[0]?.score ?? 0;
-        return `\n\n--- Retrieved Facts (sql:documents) ---\nDOCUMENT COUNT (${filterDesc}): ${n}\nThis count is authoritative — it was computed from SQL, not estimated.\n--- End Retrieved Facts ---`;
+        return `\n\n--- Retrieved Facts (sql:documents) ---\nDOCUMENT COUNT (${filterDesc}): ${retrievalCount}\nThis count is authoritative — it was computed from SQL, not estimated.\n--- End Retrieved Facts ---`;
       }
-      if (r.results.length === 0) return null;
-      const reg = new DocumentRegistry(this.db);
-      const lines: string[] = [];
-      for (const res of r.results.slice(0, 50)) {
-        if (!res.document_id) continue;
-        const doc = reg.get(res.document_id);
-        if (!doc) continue;
-        lines.push(`- [${doc.document_id}] ${doc.file_name}${doc.title ? ` — ${doc.title}` : ''}${doc.sender ? ` (sender: ${doc.sender})` : ''}`);
-      }
+      if (documents.length === 0) return null;
+      const lines = documents.slice(0, 50).map(d =>
+        `- [${d.document_id}] ${d.file_name}${d.title ? ` — ${d.title}` : ''}${d.sender ? ` (sender: ${d.sender})` : ''}`
+      );
       const intentLabel = r.intent === 'EXACT_SEARCH' ? 'Exact-match Documents' :
                           r.intent === 'SEMANTIC' ? 'Semantically-relevant Documents' :
                           r.intent === 'FILTERED_SEARCH' ? 'Filtered Documents' : 'Documents';
@@ -336,6 +366,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   getLastRetrievalIntent(): QueryIntent | null { return this._lastRetrievalIntent; }
   getLastRetrievalResults(): RetrievalResult[] { return this._lastRetrievalResults; }
+  getLastRetrievalMetadata(): RetrievalMetadata | null { return this._lastRetrievalMetadata; }
 
   private registerBuiltinTools(): void {
     for (const tool of getBuiltinTools()) {
@@ -845,6 +876,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
     const retrievalContextStream = await this._buildRetrievalContext(input);
     const augmentedSystemPromptStream = retrievalContextStream ? this.systemPrompt + retrievalContextStream : this.systemPrompt;
+    // R3: emit retrieval event BEFORE any model token streaming begins.
+    if (this._lastRetrievalMetadata && callbacks.onRetrieval) {
+      callbacks.onRetrieval(this._lastRetrievalMetadata);
+    }
 
     // First response: stream it
     let response: LLMResponse;

@@ -119,9 +119,12 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
 
           const response = await agent.chat(message, sessionId);
+          // R3: surface retrieval metadata when the agent has it (flag on).
+          const retrievalMeta = agent.getLastRetrievalMetadata?.() ?? null;
           sendJson(res, 200, {
             response,
             sessionId: sessionId ?? 'default',
+            ...(retrievalMeta ? { retrieval: retrievalMeta } : {}),
           });
           return;
         }
@@ -146,6 +149,10 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
 
           try {
             await agent.chatStream(message, {
+              onRetrieval: (metadata) => {
+                // R3: emit retrieval event BEFORE first token (only when flag is on)
+                res.write(`data: ${JSON.stringify({ type: 'retrieval', retrieval: metadata })}\n\n`);
+              },
               onToken: (token: string) => {
                 res.write(`data: ${JSON.stringify({ type: 'token', content: token })}\n\n`);
               },
