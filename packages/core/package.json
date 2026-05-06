@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentx/builder-v2": "workspace:*",
     "@anthropic-ai/sdk": "^0.39.0",
     "openai": "^4.77.0",
     "better-sqlite3": "^11.7.0",

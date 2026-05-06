@@ -87,6 +87,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@agentx/builder-v2':
+        specifier: workspace:*
+        version: link:../builder-v2
       '@anthropic-ai/sdk':
         specifier: ^0.39.0
         version: 0.39.0

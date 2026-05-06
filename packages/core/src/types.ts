@@ -8,6 +8,23 @@ export type LLMProvider = z.infer<typeof LLMProviderSchema>;
 export const MessageRoleSchema = z.enum(['system', 'user', 'assistant', 'tool']);
 export type MessageRole = z.infer<typeof MessageRoleSchema>;
 
+/**
+ * Multimodal content block — image/audio/document attachments to a message.
+ *
+ * Lifted from claude/silly-johnson during Phase B3 union-merge.
+ * Used by the multimodal subsystem and the chat/multimodal route.
+ */
+export interface MultimodalContentBlock {
+  type: 'text' | 'image' | 'audio' | 'document';
+  data?: string;
+  path?: string;
+  text?: string;
+  mimeType?: string;
+  transcription?: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface Message {
   role: MessageRole;
   content: string;
@@ -15,6 +32,8 @@ export interface Message {
   toolCallId?: string;
   toolCalls?: ToolCall[];
   timestamp: number;
+  /** Phase B3 union-merge: multimodal attachments from silly-johnson. */
+  multimodalContent?: MultimodalContentBlock[];
 }
 
 export interface ToolCall {
@@ -319,6 +338,71 @@ export interface AgentConfig {
     enabled: boolean;
     port: number;
     authToken?: string;
+  };
+  /**
+   * Phase B3 union-merge — config sections lifted from claude/silly-johnson.
+   * All optional so existing main configs without these sections remain valid.
+   */
+  computerControl?: {
+    enabled: boolean;
+    defaultMode: string;
+    maxActLoopSteps: number;
+  };
+  enableMemoryLearning?: boolean;
+  /**
+   * Feature flags shown on the Settings page. Each flag controls a live
+   * behaviour in the running agent:
+   *   - builderV2:        whether BuilderV2 app-generation pipeline is used
+   *                       (vs. the legacy chat-based build path).
+   *   - buildLearning:    whether BuildIntelligenceService biases model
+   *                       ranking in ModelFabric.
+   *   - projectWorkflows: whether the Projects page records automation_runs.
+   */
+  features?: {
+    builderV2?: boolean;
+    buildLearning?: boolean;
+    projectWorkflows?: boolean;
+    /**
+     * When enabled (default: true), AgentX runs a post-turn tool-call
+     * evaluator after any chat turn that used tools. The evaluator is
+     * fire-and-forget (adds zero user-visible latency) and feeds a
+     * `tool_call_quality` signal into the performance store that ranks
+     * weak tool-callers down over time. Disable if the extra evaluator
+     * call (tiny — uses llama3.1:8b) is unwanted.
+     */
+    toolCallEvaluator?: boolean;
+    /**
+     * When enabled, AgentX emits OpenTelemetry GenAI-conventioned spans for
+     * every LLM call, tool execution, and subagent run. Spans are held
+     * in-process unless OTEL_EXPORTER_OTLP_ENDPOINT is set (typically
+     * http://localhost:6006/v1/traces for Arize Phoenix, purely local).
+     * Default: false — zero overhead when off.
+     */
+    otelTracing?: boolean;
+    /**
+     * When also enabled, OTel spans include prompt / tool-argument content.
+     * Useful for debugging but more privacy-sensitive. Requires otelTracing.
+     * Default: false.
+     */
+    otelContentTracing?: boolean;
+    /**
+     * When enabled (default: true for backward compatibility), the
+     * `web_search` tool is registered and advertised to the LLM. Queries
+     * are sent to DuckDuckGo's public endpoints (api.duckduckgo.com and
+     * html.duckduckgo.com) over HTTPS. Disable to keep the agent fully
+     * offline — no query text ever leaves the host.
+     */
+    webSearch?: boolean;
+  };
+  routing?: {
+    mode: 'LOCAL_ONLY' | 'COMBINATION' | 'SUBSCRIPTION_ONLY';
+    maxLocalFailuresBeforeCloud?: number;
+    allowCloudForLatencySensitiveTasks?: boolean;
+    latencySensitiveThresholdMs?: number;
+    fallbackChains?: Record<string, string[]>;
+    capabilityPins?: Record<string, string>;
+    /** User-set "default model" override from Settings page. */
+    forceModel?: string | null;
   };
 }
 

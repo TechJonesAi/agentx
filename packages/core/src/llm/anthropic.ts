@@ -6,7 +6,7 @@ import type { LLMRequestOptions, LLMResponse, Message, ToolDefinition, StreamCal
 const log = createLogger('llm:anthropic');
 
 export class AnthropicProvider extends BaseLLMProvider {
-  readonly name = 'anthropic';
+  readonly name: string = 'anthropic';
   private client: Anthropic | null = null;
   private model: string;
   private maxTokens: number;
