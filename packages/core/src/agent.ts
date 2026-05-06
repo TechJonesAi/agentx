@@ -78,6 +78,25 @@ import type { Subagent, SubagentConfig } from './agent-loop/subagent.js';
 import { MultiAgentBuildSupervisor } from './agents/multi-agent-supervisor.js';
 import type { HybridOrchestrator } from './hybrid/hybrid-orchestrator.js';
 import type { ModelFabric } from './llm/model-fabric.js';
+// Phase B-merge round 2: additional lifted subsystems exposed via getters
+import { EpisodeStore } from './memory/episodic-memory.js';
+import { CategorizedMemoryStore } from './memory/categorized-memory.js';
+import { MemoryIngestionEngine } from './memory/memory-ingestion.js';
+import { KnowledgeFlowEngine } from './memory/knowledge-flow.js';
+import { KnowledgeAugmenter } from './memory/knowledge-augmenter.js';
+import { AdvisorOrchestrator } from './memory/advisor-orchestrator.js';
+import { BuildSessionManager } from './memory/build-session.js';
+import { InteractionEvaluator } from './memory/interaction-evaluator.js';
+import { EmailIngestionService } from './email/index.js';
+import { LLMInteractionLogger } from './observability/llm-interaction-logger.js';
+import { SystemLogBuffer } from './observability/system-log-buffer.js';
+import { ActionEngine } from './action-engine/index.js';
+import { RealAutomationPolicyService } from './services/automation-policy.js';
+import { RealAutomationRunStore } from './services/automation-run-store.js';
+import { RealAutomationEngine } from './services/automation-engine.js';
+import { RealComputerPermissionService } from './services/computer-permission.js';
+import { RealComputerSettingsService } from './services/computer-settings.js';
+import { RealScreenshotManager } from './services/screenshot-manager.js';
 
 const log = createLogger('agent');
 
@@ -187,6 +206,27 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   // multi-provider routing layer.
   private _hybridOrchestrator: HybridOrchestrator | null = null;
   private _modelFabric: ModelFabric | null = null;
+
+  // ── Phase B-merge round 2: eager-init subsystems with safe ctors ──────
+  // All declared `!` because the constructor's restoration block fills them
+  // before any external caller can reach them via getters.
+  private _episodeStore!: EpisodeStore;
+  private _categorizedMemoryStore!: CategorizedMemoryStore;
+  private _memoryIngestionEngine!: MemoryIngestionEngine;
+  private _knowledgeFlowEngine!: KnowledgeFlowEngine;
+  private _knowledgeAugmenter!: KnowledgeAugmenter;
+  private _advisorOrchestrator!: AdvisorOrchestrator;
+  private _buildSessionManager!: BuildSessionManager;
+  private _interactionEvaluator!: InteractionEvaluator;
+  private _automationPolicyService!: RealAutomationPolicyService;
+  private _automationRunStore!: RealAutomationRunStore;
+  private _automationEngine!: RealAutomationEngine;
+  private _computerPermissionService!: RealComputerPermissionService;
+  private _computerSettingsService!: RealComputerSettingsService;
+  private _screenshotManager!: RealScreenshotManager;
+  // Lazy: depends on external config (Gmail Keychain) or circular refs
+  private _emailIngestionService: EmailIngestionService | null = null;
+  private _actionEngine: ActionEngine | null = null;
 
   constructor(configPath?: string) {
     super();
@@ -402,12 +442,49 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       this._multiAgentSupervisor = new MultiAgentBuildSupervisor();
     }
 
+    // ── Phase B-merge round 2: eager-init the safe-ctor subsystems ──────
+    // Memory layer (categorized/episode/ingestion/consolidator/flow)
+    this._episodeStore = new EpisodeStore(this.db as never);
+    this._categorizedMemoryStore = new CategorizedMemoryStore(this.db);
+    this._memoryIngestionEngine = new MemoryIngestionEngine(this._categorizedMemoryStore);
+    this._memoryConsolidator = new MemoryConsolidator(this._categorizedMemoryStore);
+    this._knowledgeFlowEngine = new KnowledgeFlowEngine(
+      this.db as never,
+      this._learningEngine,
+      this._episodeStore,
+    );
+    // Wire knowledge flow into the consolidator so cross-session learning
+    // signals reinforce memory ranking (silly-johnson behaviour).
+    this._memoryConsolidator.setKnowledgeFlow(this._knowledgeFlowEngine);
+    this._knowledgeAugmenter = new KnowledgeAugmenter();
+    this._advisorOrchestrator = new AdvisorOrchestrator();
+    this._buildSessionManager = new BuildSessionManager();
+    this._interactionEvaluator = new InteractionEvaluator();
+
+    // Automation/computer-control services — all default-deny / no-op until
+    // explicitly enabled by config or runtime calls. Safe to eager-init.
+    this._automationPolicyService = new RealAutomationPolicyService();
+    this._automationRunStore = new RealAutomationRunStore();
+    this._computerPermissionService = new RealComputerPermissionService();
+    this._computerSettingsService = new RealComputerSettingsService();
+    this._screenshotManager = new RealScreenshotManager(dataDir);
+    this._automationEngine = new RealAutomationEngine(
+      this._automationPolicyService,
+      this._automationRunStore,
+      this.toolRegistry,
+      this.auditLogger,
+    );
+
     log.info({
       checkpoint: !!this._checkpointManager,
       baseline: !!this._baselineRegistry,
       autonomy: !!this._autonomyGate,
       buildLearning: !!this._buildIntelligenceService,
       builderV2: !!this._multiAgentSupervisor,
+      memory: !!this._categorizedMemoryStore,
+      consolidator: !!this._memoryConsolidator,
+      knowledgeFlow: !!this._knowledgeFlowEngine,
+      automation: !!this._automationEngine,
     }, 'Phase B-merge subsystems initialized');
   }
 
@@ -609,8 +686,51 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getPersonalIntelligence(): PersonalIntelligence { return this._personalIntelligence; }
   getIntelligenceHardening(): IntelligenceHardening { return this._intelligenceHardening; }
   getAdaptiveStatus(): AdaptiveStatusService { return this._adaptiveStatusService; }
-  getMemoryConsolidator(): MemoryConsolidator | null { return this._memoryConsolidator; }
+  getMemoryConsolidator(): MemoryConsolidator { return this._memoryConsolidator!; }
   getVectorIndexService(): VectorIndexService | null { return this._vectorIndexService; }
+  getEpisodeStore(): EpisodeStore { return this._episodeStore; }
+  getCategorizedMemoryStore(): CategorizedMemoryStore { return this._categorizedMemoryStore; }
+  getMemoryIngestionEngine(): MemoryIngestionEngine { return this._memoryIngestionEngine; }
+  getKnowledgeFlowEngine(): KnowledgeFlowEngine { return this._knowledgeFlowEngine; }
+  getKnowledgeAugmenter(): KnowledgeAugmenter { return this._knowledgeAugmenter; }
+  getAdvisorOrchestrator(): AdvisorOrchestrator { return this._advisorOrchestrator; }
+  getBuildSessionManager(): BuildSessionManager { return this._buildSessionManager; }
+  getInteractionEvaluator(): InteractionEvaluator { return this._interactionEvaluator; }
+
+  /** Automation / computer-control services (all default-deny). */
+  getAutomationPolicyService(): RealAutomationPolicyService { return this._automationPolicyService; }
+  getAutomationRunStore(): RealAutomationRunStore { return this._automationRunStore; }
+  getAutomationEngine(): RealAutomationEngine { return this._automationEngine; }
+  getComputerPermissionService(): RealComputerPermissionService { return this._computerPermissionService; }
+  getComputerSettingsService(): RealComputerSettingsService { return this._computerSettingsService; }
+  getScreenshotManager(): RealScreenshotManager { return this._screenshotManager; }
+
+  /** Lazy email ingestion — first call constructs from default config.
+   *  Returns null on instantiation failure (e.g. permission errors on data dir). */
+  getEmailIngestionService(): EmailIngestionService | null {
+    if (!this._emailIngestionService) {
+      try {
+        this._emailIngestionService = new EmailIngestionService();
+      } catch (err) {
+        log.warn({ err: String(err) }, 'EmailIngestionService init failed');
+        return null;
+      }
+    }
+    return this._emailIngestionService;
+  }
+
+  /** Lazy action-engine — first call constructs with this agent passed in. */
+  getActionEngine(): ActionEngine {
+    if (!this._actionEngine) {
+      // ActionEngine defines its own structural AgentInterface — cast via never.
+      this._actionEngine = new ActionEngine({}, this as never);
+    }
+    return this._actionEngine;
+  }
+
+  /** Singleton observability loggers — exposed for the Logs page. */
+  getLLMInteractionLogger(): LLMInteractionLogger { return LLMInteractionLogger.getInstance(); }
+  getSystemLogBuffer(): SystemLogBuffer { return SystemLogBuffer.getInstance(); }
   getGlobalLearningService(): GlobalLearningService | null { return this._globalLearningService; }
   getBuildIntelligenceService(): BuildIntelligenceService | null { return this._buildIntelligenceService; }
   getSelfImprovementService(): SelfImprovementService | null { return this._selfImprovementService; }
