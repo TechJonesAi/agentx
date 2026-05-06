@@ -15,6 +15,8 @@ import {
   deleteMemoryItem,
   bulkDeleteMemoryItems,
 } from './memory-control-center.js';
+import { parseMultipartBody, MultipartError } from '../multipart.js';
+import { ingestUploadedDocument } from '@agentx/core';
 
 const log = createLogger('web:api');
 
@@ -1029,6 +1031,85 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           } catch (e) {
             log.error({ err: e, route, method }, 'memory control-center detail/delete failed');
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // ─── Document upload — REAL ingestion (no shim) ─────────────────
+        // Accepts multipart/form-data with one or more `file` parts. For each
+        // file: extract text (txt/md/pdf supported today; docx/msg deferred),
+        // INSERT documents+document_chunks (FTS triggers populate the index),
+        // run R5 entity ingestion when enabled. Uploaded docs immediately
+        // appear in /api/memory/control-center and are retrievable via chat.
+        if ((route === '/api/memory/upload-document' || route === '/api/cognitive/ingest')
+            && method === 'POST') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 503, { ok: false, error: 'no database' }); return; }
+            let parsed;
+            try {
+              parsed = await parseMultipartBody(req);
+            } catch (err) {
+              if (err instanceof MultipartError) {
+                sendJson(res, err.status, { ok: false, error: err.message });
+                return;
+              }
+              throw err;
+            }
+            if (parsed.files.length === 0) {
+              sendJson(res, 400, { ok: false, error: 'no files in upload' });
+              return;
+            }
+            const uploaded: Array<Record<string, unknown>> = [];
+            for (const file of parsed.files) {
+              try {
+                const result = await ingestUploadedDocument(
+                  db as unknown as import('@agentx/core').IngestArgs extends never ? never : Parameters<typeof ingestUploadedDocument>[0],
+                  {
+                    buffer: file.data,
+                    filename: file.filename,
+                    mimeHint: file.contentType,
+                    title: parsed.fields['title'] || undefined,
+                    originType: parsed.fields['origin_type'] || 'upload',
+                  },
+                );
+                // R5: run entity ingestion if enabled — uses the document's
+                // first chunk text since we already chunked it during ingest.
+                let entityResult: unknown = null;
+                if (typeof (agent as unknown as { isEntityIndexingEnabled?: () => boolean }).isEntityIndexingEnabled === 'function'
+                    && (agent as unknown as { isEntityIndexingEnabled: () => boolean }).isEntityIndexingEnabled()) {
+                  try {
+                    const ingestFn = (agent as unknown as { ingestDocumentEntities?: (id: string, text: string) => unknown }).ingestDocumentEntities;
+                    if (typeof ingestFn === 'function' && !result.duplicateOf) {
+                      entityResult = ingestFn.call(agent, result.documentId, file.data.toString('utf8').slice(0, 100_000));
+                    }
+                  } catch (err) {
+                    log.warn({ err: String(err), documentId: result.documentId }, 'entity ingestion failed');
+                  }
+                }
+                uploaded.push({
+                  document_id: result.documentId,
+                  file_name: result.fileName,
+                  file_type: result.fileType,
+                  mime_type: result.mimeType,
+                  origin_type: result.originType,
+                  chunk_count: result.chunkCount,
+                  word_count: result.wordCount,
+                  duplicate_of: result.duplicateOf ?? null,
+                  warnings: result.warnings,
+                  entity_indexed: !!entityResult,
+                });
+              } catch (err) {
+                uploaded.push({
+                  file_name: file.filename,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+            sendJson(res, 200, { ok: true, uploaded });
+          } catch (e) {
+            log.error({ err: e, route }, 'upload route failed');
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
           }
           return;
         }

@@ -64,7 +64,7 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   // Cognitive (only /api/cognitive/status is implemented)
   { kind: 'prefix', prefix: '/api/cognitive/books' },
   { kind: 'prefix', prefix: '/api/cognitive/document' },
-  { kind: 'exact', route: '/api/cognitive/ingest' },
+  // (`/api/cognitive/ingest` now real — see api.ts upload handler.)
   { kind: 'exact', route: '/api/cognitive/ingest-book' },
   { kind: 'exact', route: '/api/cognitive/run' },
   // Integrity / self-repair
@@ -81,7 +81,7 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   //  — see memory-control-center.ts. Document-detail prefix still shimmed.)
   { kind: 'prefix', prefix: '/api/memory/gateway/document' },
   // (`/api/memory/stats` now real — see api.ts)
-  { kind: 'exact', route: '/api/memory/upload-document' },
+  // (`/api/memory/upload-document` now real — see api.ts upload handler.)
   // Model routing config
   { kind: 'exact', route: '/api/models/routing' },
   // (`/api/multimodal/status` now real — see api.ts)
