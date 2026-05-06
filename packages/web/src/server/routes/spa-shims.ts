@@ -42,14 +42,23 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   | { kind: 'exact'; route: string }
   | { kind: 'prefix'; prefix: string }
 > = [
-  // Agent loops
-  { kind: 'prefix', prefix: '/api/agent-loops' },
+  // (`/api/agent-loops/{active,history,dashboard}` now real — see api.ts.
+  //  Only `/start` and `/events` and other sub-routes still shimmed.)
+  { kind: 'exact', route: '/api/agent-loops/start' },
+  { kind: 'exact', route: '/api/agent-loops/events' },
   // Agents trace
   { kind: 'exact', route: '/api/agents/trace' },
   // Claude auth flow
   { kind: 'prefix', prefix: '/api/auth/claude' },
-  // BuilderV2 (only /api/builder/stats is implemented; runs/* are not)
+  // (`/api/builder/runs` and `/api/builder/queue` now real — see api.ts. The
+  //  prefix below covers sub-paths like /runs/:id/cancel; the real top-level
+  //  /runs handler in api.ts fires before the shim, so the prefix doesn't
+  //  intercept it at runtime.)
   { kind: 'prefix', prefix: '/api/builder/runs' },
+  { kind: 'exact', route: '/api/builder/queue/cancel' },
+  { kind: 'exact', route: '/api/builder/queue/clear' },
+  { kind: 'exact', route: '/api/builder/run' },
+  { kind: 'exact', route: '/api/builder/artifacts' },
   // Multimodal chat (text-only chat is implemented)
   { kind: 'exact', route: '/api/chat/multimodal' },
   // Cognitive (only /api/cognitive/status is implemented)
@@ -63,18 +72,20 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   // (`/api/logs/llm-interactions` and `/api/logs/system` now real — see api.ts.
   //  Subroutes like /api/logs/llm-interactions/:id are still unimplemented.)
   { kind: 'prefix', prefix: '/api/logs/llm-interactions/' },
-  // MCP server management
-  { kind: 'prefix', prefix: '/api/mcp' },
+  // (`/api/mcp/servers` and `/api/mcp/tools` now real read-only — see api.ts.
+  //  Real handlers fire first; the prefix below only catches sub-paths like
+  //  /api/mcp/servers/:id at the matcher level.)
+  { kind: 'prefix', prefix: '/api/mcp/servers' },
+  { kind: 'exact', route: '/api/mcp/allow-remote' },
   // Memory control-center + gateway/query + upload + stats
   { kind: 'prefix', prefix: '/api/memory/control-center' },
   { kind: 'prefix', prefix: '/api/memory/gateway/document' },
   { kind: 'exact', route: '/api/memory/gateway/query' },
-  { kind: 'exact', route: '/api/memory/stats' },
+  // (`/api/memory/stats` now real — see api.ts)
   { kind: 'exact', route: '/api/memory/upload-document' },
   // Model routing config
   { kind: 'exact', route: '/api/models/routing' },
-  // Multimodal status
-  { kind: 'exact', route: '/api/multimodal/status' },
+  // (`/api/multimodal/status` now real — see api.ts)
   // (`/api/supervisor/status` now real — see api.ts. Other supervisor
   //  subroutes — restart, services, simulate-crash, logs/:id — still shimmed.)
   { kind: 'exact', route: '/api/supervisor/restart' },
@@ -83,8 +94,7 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'prefix', prefix: '/api/supervisor/logs' },
   // Telemetry sink
   { kind: 'exact', route: '/api/telemetry' },
-  // Text-to-speech
-  { kind: 'exact', route: '/api/tts' },
+  // (`/api/tts`, `/api/tts/health`, `/api/tts/voices` now real via tts/router)
   // Validation lab
   { kind: 'prefix', prefix: '/api/validation' },
   // Vision

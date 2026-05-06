@@ -96,47 +96,59 @@ describe('SPA shims — pure matcher', () => {
   });
 
   it('matches exact known-unimplemented endpoints', () => {
-    const r = tryUnsupportedSpaShim('POST', '/api/tts');
+    // /api/telemetry is still shimmed (no real route); /api/tts is now real.
+    const r = tryUnsupportedSpaShim('POST', '/api/telemetry');
     expect(r?.status).toBe(501);
     expect(r?.body.available).toBe(false);
     expect(r?.body.reason).toBe('not implemented on this build');
     expect(r?.body.method).toBe('POST');
-    expect(r?.body.endpoint).toBe('/api/tts');
+    expect(r?.body.endpoint).toBe('/api/telemetry');
   });
 
   it('matches sub-paths under prefix entries', () => {
+    // /api/integrity prefix still shims sub-paths (status was extracted to a
+    // real route in Phase D-prep round 1; repair / repair/:id still shimmed).
     expect(tryUnsupportedSpaShim('POST', '/api/integrity/repair')?.status).toBe(501);
     expect(tryUnsupportedSpaShim('GET', '/api/integrity/repair/abc-123')?.status).toBe(501);
-    expect(tryUnsupportedSpaShim('GET', '/api/agent-loops/history')?.status).toBe(501);
-    expect(tryUnsupportedSpaShim('POST', '/api/validation/run')?.status).toBe(501);
+    // agent-loops/history is now real — use /start which is still shimmed.
+    expect(tryUnsupportedSpaShim('POST', '/api/agent-loops/start')?.status).toBe(501);
+    expect(tryUnsupportedSpaShim('GET', '/api/agent-loops/events')?.status).toBe(501);
+    // validation/run is now real — apply / patches / rollback still shimmed.
+    expect(tryUnsupportedSpaShim('POST', '/api/validation/apply')?.status).toBe(501);
     expect(tryUnsupportedSpaShim('POST', '/api/vision/analyze')?.status).toBe(501);
+    // mcp/servers list is now real — sub-path still shimmed.
     expect(tryUnsupportedSpaShim('GET', '/api/mcp/servers/foo')?.status).toBe(501);
   });
 
-  it('does NOT match prefixes of implemented endpoints (e.g. /api/builder/stats)', () => {
-    // /api/builder/runs is unimplemented; /api/builder/stats is implemented.
+  it('does NOT match implemented top-level endpoints', () => {
+    // /api/builder/stats is implemented and not in the shim list.
     expect(tryUnsupportedSpaShim('GET', '/api/builder/stats')).toBeNull();
-    expect(tryUnsupportedSpaShim('GET', '/api/builder/runs')?.status).toBe(501);
+    // /api/builder/runs is implemented as a real route in api.ts; the
+    // matcher itself MAY still return a shim envelope (the prefix is kept
+    // so sub-paths like /runs/123 match), but the api router checks real
+    // handlers BEFORE the shim, so live behaviour at /api/builder/runs is
+    // the real implementation. Sub-path is still shimmed at the matcher.
     expect(tryUnsupportedSpaShim('GET', '/api/builder/runs/123')?.status).toBe(501);
   });
 
   it('strips query string and trailing slash for matching', () => {
-    expect(tryUnsupportedSpaShim('GET', '/api/tts?voice=Aria')?.status).toBe(501);
+    expect(tryUnsupportedSpaShim('POST', '/api/telemetry?from=ui')?.status).toBe(501);
     expect(tryUnsupportedSpaShim('GET', '/api/integrity/repair/')?.status).toBe(501);
   });
 });
 
 describe('SPA shims — wired into the api router', () => {
-  it('GET /api/tts returns 501 + safe JSON envelope (not HTML, not raw 404)', async () => {
+  it('GET /api/telemetry returns 501 + safe JSON envelope (not HTML, not raw 404)', async () => {
+    // /api/telemetry is one of the still-shimmed exact routes; this test
+    // asserts the SPA shim contract end-to-end through the router.
     const router = createApiRouter(fakeAgent() as never);
-    const r = await call(router, 'GET', '/api/tts');
+    const r = await call(router, 'GET', '/api/telemetry');
     expect(r.status).toBe(501);
     expect(String(r.headers['content-type'] ?? '')).toMatch(/application\/json/);
     expect(r.body['available']).toBe(false);
     expect(r.body['reason']).toBe('not implemented on this build');
-    expect(r.body['endpoint']).toBe('/api/tts');
+    expect(r.body['endpoint']).toBe('/api/telemetry');
     expect(r.body['method']).toBe('GET');
-    // raw response is parseable JSON, never HTML
     expect(r.raw.startsWith('<')).toBe(false);
   });
 
