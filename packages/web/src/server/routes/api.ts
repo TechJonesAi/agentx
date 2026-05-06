@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import * as http from 'node:http';
 import type { Agent } from '@agentx/core';
 import { createLogger } from '@agentx/core';
+import { tryUnsupportedSpaShim, unknownEndpointEnvelope } from './spa-shims.js';
 
 const log = createLogger('web:api');
 
@@ -407,8 +408,255 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
-        // ─── 404 ────────────────────────────────────────────────────────
-        sendJson(res, 404, { error: `Not found: ${method} ${route}` });
+        // ─── Phase D-prep: routes backed by lifted-subsystem getters ────
+        // Each block uses optional chaining + try/catch so a misconfigured
+        // subsystem returns a clean JSON error rather than a 500.
+        // Implementations call into the agent's eager-init or lazy
+        // getters added in agent.ts merge rounds 1 + 2.
+
+        // Logs page → LLM interaction history + system log buffer
+        if (route === '/api/logs/llm-interactions' && method === 'GET') {
+          try {
+            const logger = (agent as unknown as { getLLMInteractionLogger?: () => { recent(n?: number): unknown } }).getLLMInteractionLogger?.();
+            const entries = logger?.recent(200) ?? [];
+            sendJson(res, 200, { entries });
+          } catch (e) {
+            sendJson(res, 200, { entries: [], error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/logs/system' && method === 'GET') {
+          try {
+            const buf = (agent as unknown as { getSystemLogBuffer?: () => { recent(n?: number): unknown } }).getSystemLogBuffer?.();
+            const entries = buf?.recent(500) ?? [];
+            sendJson(res, 200, { entries });
+          } catch (e) {
+            sendJson(res, 200, { entries: [], error: String(e) });
+          }
+          return;
+        }
+
+        // Automation page → policies + runs + kill-switch
+        if (route === '/api/automation/policies' && method === 'GET') {
+          try {
+            const svc = (agent as unknown as { getAutomationPolicyService?: () => { listPolicies(): unknown[] } }).getAutomationPolicyService?.();
+            sendJson(res, 200, { policies: svc?.listPolicies() ?? [] });
+          } catch (e) {
+            sendJson(res, 200, { policies: [], error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/automation/runs' && method === 'GET') {
+          try {
+            const store = (agent as unknown as { getAutomationRunStore?: () => { listRuns(): unknown[] } }).getAutomationRunStore?.();
+            sendJson(res, 200, { runs: store?.listRuns?.() ?? [] });
+          } catch (e) {
+            sendJson(res, 200, { runs: [], error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/automation/kill-switch' && method === 'POST') {
+          try {
+            const eng = (agent as unknown as { getAutomationEngine?: () => { engageKillSwitch?: () => unknown } }).getAutomationEngine?.();
+            eng?.engageKillSwitch?.();
+            sendJson(res, 200, { ok: true, killSwitchEngaged: true });
+          } catch (e) {
+            sendJson(res, 503, { ok: false, error: String(e) });
+          }
+          return;
+        }
+
+        // Email page → status + allowlist (read-only, never triggers send)
+        if (route === '/api/email/status' && method === 'GET') {
+          const svc = (agent as unknown as { getEmailIngestionService?: () => unknown | null }).getEmailIngestionService?.();
+          if (!svc) {
+            sendJson(res, 200, { available: false, reason: 'Email ingestion not configured (no Keychain credential)', enabled: false });
+            return;
+          }
+          try {
+            const state = (svc as { getState?: () => unknown }).getState?.() ?? null;
+            sendJson(res, 200, { available: true, enabled: true, state });
+          } catch (e) {
+            sendJson(res, 200, { available: true, enabled: false, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/email/allowlist' && method === 'GET') {
+          const svc = (agent as unknown as { getEmailIngestionService?: () => unknown | null }).getEmailIngestionService?.();
+          if (!svc) {
+            sendJson(res, 200, { allowlist: [], available: false });
+            return;
+          }
+          try {
+            const list = (svc as { getAllowlist?: () => unknown[] }).getAllowlist?.() ?? [];
+            sendJson(res, 200, { allowlist: list, available: true });
+          } catch (e) {
+            sendJson(res, 200, { allowlist: [], error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/email/test-connection' && method === 'POST') {
+          const svc = (agent as unknown as { getEmailIngestionService?: () => unknown | null }).getEmailIngestionService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: 'Email ingestion not configured' });
+            return;
+          }
+          try {
+            const test = (svc as { testConnection?: () => Promise<unknown> }).testConnection;
+            const result = test ? await test.call(svc) : { ok: false, error: 'testConnection not implemented' };
+            sendJson(res, 200, result);
+          } catch (e) {
+            sendJson(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Validation lab → scenarios list + run controller status
+        if (route === '/api/validation/scenarios' && method === 'GET') {
+          try {
+            const c = (agent as unknown as { getSelfImprovementController?: () => { listScenarios?: () => unknown[] } }).getSelfImprovementController?.();
+            sendJson(res, 200, { scenarios: c?.listScenarios?.() ?? [] });
+          } catch (e) {
+            sendJson(res, 200, { scenarios: [], error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/validation/run' && method === 'POST') {
+          try {
+            const body = await parseBody(req).catch(() => ({}));
+            const c = (agent as unknown as { getSelfImprovementController?: () => { runScenario?: (id: string) => Promise<unknown> } }).getSelfImprovementController?.();
+            const id = String((body as Record<string, unknown>)['scenarioId'] ?? 'default');
+            if (!c?.runScenario) {
+              sendJson(res, 501, { available: false, reason: 'Validation controller not wired' });
+              return;
+            }
+            const result = await c.runScenario(id);
+            sendJson(res, 200, { ok: true, result });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Integrity / autonomy / hardening status — all read-only, safe
+        if (route === '/api/integrity/status' && method === 'GET') {
+          try {
+            const ih = (agent as unknown as { getIntelligenceHardening?: () => { diagnostics?: () => unknown } }).getIntelligenceHardening?.();
+            const diag = ih?.diagnostics?.() ?? null;
+            sendJson(res, 200, { available: !!ih, hardening: diag });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/autonomy/status' && method === 'GET') {
+          try {
+            const g = (agent as unknown as { getAutonomyGate?: () => { status?: () => unknown } }).getAutonomyGate?.();
+            const status = g?.status?.() ?? null;
+            sendJson(res, 200, { available: !!g, status });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+
+        // Stability — checkpoints + baselines (read-only)
+        if (route === '/api/checkpoints' && method === 'GET') {
+          try {
+            const cm = (agent as unknown as { getCheckpointManager?: () => { list?: () => unknown[] } }).getCheckpointManager?.();
+            sendJson(res, 200, { checkpoints: cm?.list?.() ?? [] });
+          } catch (e) {
+            sendJson(res, 200, { checkpoints: [], error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/baselines' && method === 'GET') {
+          try {
+            const br = (agent as unknown as { getBaselineRegistry?: () => { listFeatures?: () => unknown[] } }).getBaselineRegistry?.();
+            sendJson(res, 200, { features: br?.listFeatures?.() ?? [] });
+          } catch (e) {
+            sendJson(res, 200, { features: [], error: String(e) });
+          }
+          return;
+        }
+
+        // Learning + adaptive intelligence stats
+        if (route === '/api/learning/stats' && method === 'GET') {
+          try {
+            const le = (agent as unknown as { getLearningEngine?: () => { getStats?: () => unknown } }).getLearningEngine?.();
+            sendJson(res, 200, le?.getStats?.() ?? { signals: 0 });
+          } catch (e) {
+            sendJson(res, 200, { signals: 0, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/personal-intelligence/status' && method === 'GET') {
+          try {
+            const pi = (agent as unknown as { getPersonalIntelligence?: () => { status?: () => unknown } }).getPersonalIntelligence?.();
+            sendJson(res, 200, pi?.status?.() ?? { available: !!pi });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/adaptive/status' && method === 'GET') {
+          try {
+            const a = (agent as unknown as { getAdaptiveStatus?: () => { getReport?: () => unknown } }).getAdaptiveStatus?.();
+            sendJson(res, 200, a?.getReport?.() ?? { subsystems: [] });
+          } catch (e) {
+            sendJson(res, 200, { subsystems: [], error: String(e) });
+          }
+          return;
+        }
+
+        // Multi-agent supervisor (BuilderV2)
+        if (route === '/api/supervisor/status' && method === 'GET') {
+          const sup = (agent as unknown as { getMultiAgentSupervisor?: () => unknown | null }).getMultiAgentSupervisor?.();
+          if (!sup) {
+            sendJson(res, 200, { available: false, reason: 'BuilderV2 feature flag is off' });
+            return;
+          }
+          try {
+            const status = (sup as { getStatus?: () => unknown }).getStatus?.() ?? null;
+            sendJson(res, 200, { available: true, status });
+          } catch (e) {
+            sendJson(res, 200, { available: true, error: String(e) });
+          }
+          return;
+        }
+
+        // Build memory recent runs (read DB directly via agent.getDatabase())
+        if (route === '/api/build-memory/recent' && method === 'GET') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => { prepare(s: string): { all(...a: unknown[]): unknown[] } } }).getDatabase?.();
+            if (!db) {
+              sendJson(res, 200, { recent: [] });
+              return;
+            }
+            // Query is best-effort — table may not exist yet on a fresh DB
+            try {
+              const rows = db.prepare(`SELECT * FROM build_memory ORDER BY created_at DESC LIMIT 50`).all();
+              sendJson(res, 200, { recent: rows });
+            } catch {
+              sendJson(res, 200, { recent: [] });
+            }
+          } catch (e) {
+            sendJson(res, 200, { recent: [], error: String(e) });
+          }
+          return;
+        }
+
+        // ─── SPA-known but unimplemented endpoints → 501 (Step 3) ───────
+        // Returns a uniform JSON envelope so SPA panels can detect
+        // `available: false` instead of guessing from `error` strings.
+        const shim = tryUnsupportedSpaShim(method, route);
+        if (shim) {
+          sendJson(res, shim.status, shim.body);
+          return;
+        }
+
+        // ─── 404 (uniform envelope) ─────────────────────────────────────
+        sendJson(res, 404, unknownEndpointEnvelope(method, route));
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         log.error({ method, route, error: msg }, 'API error');
