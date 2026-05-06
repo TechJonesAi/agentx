@@ -9,6 +9,12 @@ import type { Agent } from '@agentx/core';
 import { createLogger } from '@agentx/core';
 import { tryUnsupportedSpaShim, unknownEndpointEnvelope } from './spa-shims.js';
 import { createTtsRouter, type TtsRouter } from '../tts/index.js';
+import {
+  listMemoryItems,
+  getMemoryDetail,
+  deleteMemoryItem,
+  bulkDeleteMemoryItems,
+} from './memory-control-center.js';
 
 const log = createLogger('web:api');
 
@@ -963,6 +969,81 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             });
           } catch (e) {
             sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+
+        // ─── Memory Control Center — REAL DB-backed (no shims) ─────────
+        // The Memory page reads/writes through these routes. Backed by
+        // documents + long_term_memory tables. See memory-control-center.ts.
+        if (route === '/api/memory/control-center' && method === 'GET') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 200, { items: [], totalCount: 0 }); return; }
+            const u = new URL(url, 'http://x');
+            const result = listMemoryItems(db, {
+              q: u.searchParams.get('q') ?? undefined,
+              type: u.searchParams.get('type') ?? undefined,
+              sender: u.searchParams.get('sender') ?? undefined,
+              dateFrom: u.searchParams.get('dateFrom') ?? undefined,
+              dateTo: u.searchParams.get('dateTo') ?? undefined,
+              page: u.searchParams.get('page') ? Number(u.searchParams.get('page')) : undefined,
+              pageSize: u.searchParams.get('pageSize') ? Number(u.searchParams.get('pageSize')) : undefined,
+            });
+            sendJson(res, 200, result);
+          } catch (e) {
+            log.error({ err: e }, '/api/memory/control-center GET failed');
+            sendJson(res, 500, { items: [], totalCount: 0, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route === '/api/memory/control-center/bulk-delete' && method === 'POST') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 503, { ok: false, deleted: 0, error: 'no database' }); return; }
+            const body = await parseBody(req).catch(() => ({}));
+            const ids = (body as { ids?: unknown }).ids;
+            if (!Array.isArray(ids)) { sendJson(res, 400, { ok: false, deleted: 0, error: 'ids[] required' }); return; }
+            const deleted = bulkDeleteMemoryItems(db, ids.map(String));
+            sendJson(res, 200, { ok: true, deleted });
+          } catch (e) {
+            log.error({ err: e }, '/api/memory/control-center/bulk-delete failed');
+            sendJson(res, 500, { ok: false, deleted: 0, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route.startsWith('/api/memory/control-center/') && (method === 'GET' || method === 'DELETE')) {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 503, { error: 'no database' }); return; }
+            const id = decodeURIComponent(route.slice('/api/memory/control-center/'.length));
+            if (method === 'GET') {
+              const detail = getMemoryDetail(db, id);
+              if (!detail) { sendJson(res, 404, { error: `not found: ${id}` }); return; }
+              sendJson(res, 200, detail);
+            } else {
+              const ok = deleteMemoryItem(db, id);
+              if (!ok) { sendJson(res, 404, { ok: false, error: `not found: ${id}` }); return; }
+              sendJson(res, 200, { ok: true });
+            }
+          } catch (e) {
+            log.error({ err: e, route, method }, 'memory control-center detail/delete failed');
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Memory gateway query — wraps the same listing for the search box
+        if (route === '/api/memory/gateway/query' && method === 'POST') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 200, { items: [], totalCount: 0 }); return; }
+            const body = await parseBody(req).catch(() => ({}));
+            const q = String((body as { q?: unknown }).q ?? '');
+            const result = listMemoryItems(db, { q, pageSize: 100 });
+            sendJson(res, 200, result);
+          } catch (e) {
+            sendJson(res, 500, { items: [], totalCount: 0, error: e instanceof Error ? e.message : String(e) });
           }
           return;
         }

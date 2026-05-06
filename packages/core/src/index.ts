@@ -9,6 +9,7 @@ export { BaseLLMProvider, AnthropicProvider, OpenAIProvider, OllamaProvider, cre
 
 // Memory
 export { createDatabase, ConversationMemory, LongTermMemoryStore } from './memory/index.js';
+export { runCognitiveMemoryMigrations } from './db/migrations/index.js';
 export { FeedbackStore } from './memory/feedback-store.js';
 export type { FeedbackPayload, FeedbackRecord, FeedbackRating } from './memory/feedback-store.js';
 

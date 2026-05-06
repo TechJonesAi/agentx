@@ -77,10 +77,9 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   //  /api/mcp/servers/:id at the matcher level.)
   { kind: 'prefix', prefix: '/api/mcp/servers' },
   { kind: 'exact', route: '/api/mcp/allow-remote' },
-  // Memory control-center + gateway/query + upload + stats
-  { kind: 'prefix', prefix: '/api/memory/control-center' },
+  // (`/api/memory/control-center` and `/api/memory/gateway/query` now real
+  //  — see memory-control-center.ts. Document-detail prefix still shimmed.)
   { kind: 'prefix', prefix: '/api/memory/gateway/document' },
-  { kind: 'exact', route: '/api/memory/gateway/query' },
   // (`/api/memory/stats` now real — see api.ts)
   { kind: 'exact', route: '/api/memory/upload-document' },
   // Model routing config
