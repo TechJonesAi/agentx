@@ -46,6 +46,39 @@ import type { RetrievalMetadata, RetrievalMetadataDocument } from './types.js';
 import { EntityIngestionService, type EntityIngestionResult } from './entities/entity-ingestion-service.js';
 import { FeedbackStore, type FeedbackPayload, type FeedbackRecord } from './memory/feedback-store.js';
 
+// ─── Phase B-merge: silly-johnson advanced subsystems (additive) ─────────────
+// All optional. Each subsystem either:
+//   (a) eager-inits and is always available (Checkpoint/Baseline/Autonomy),
+//   (b) lazy-inits when its config flag turns on (MCP, Hooks, OAuth,
+//       AgentLoop, MultiAgentSupervisor), or
+//   (c) is exposed via a getter that returns null until wired by a future
+//       phase (HybridOrchestrator, ModelFabric).
+import { MCPClientManager } from './mcp/client-manager.js';
+import { HooksEngine } from './security/hooks-engine.js';
+import { ClaudeOAuthService } from './security/claude-oauth.js';
+import { CheckpointManager } from './stability/checkpoint-manager.js';
+import { BaselineRegistry } from './stability/baseline-registry.js';
+import { AutonomyGate } from './validation/autonomy-gate.js';
+import { SelfImprovementController } from './validation/self-improvement-controller.js';
+import { LearningEngine } from './learning/learning-engine.js';
+import { PersonalIntelligence } from './learning/personal-intelligence.js';
+import { IntelligenceHardening } from './learning/intelligence-hardening.js';
+import { GlobalLearningService } from './learning/global-learning.js';
+import { BuildIntelligenceService } from './learning/build-intelligence.js';
+import { SelfImprovementService } from './learning/self-improvement.js';
+import { UserPersonalizationService } from './learning/user-personalization.js';
+import { AdaptiveStatusService } from './learning/adaptive-status.js';
+import { MemoryConsolidator } from './memory/memory-consolidator.js';
+import { VectorIndexService } from './memory/vector-index-service.js';
+import { AgentLoopEngine } from './agent-loop/agent-loop-engine.js';
+import { ExperienceStore as LoopExperienceStore } from './agent-loop/learning/experience-store.js';
+import { eventBus as agentLoopEventBus } from './agent-loop/event-bus.js';
+import type { AgentLoopState } from './agent-loop/agent-loop-types.js';
+import type { Subagent, SubagentConfig } from './agent-loop/subagent.js';
+import { MultiAgentBuildSupervisor } from './agents/multi-agent-supervisor.js';
+import type { HybridOrchestrator } from './hybrid/hybrid-orchestrator.js';
+import type { ModelFabric } from './llm/model-fabric.js';
+
 const log = createLogger('agent');
 
 const DEFAULT_SYSTEM_PROMPT = `You are AgentX, a capable AI assistant. You can use tools to accomplish tasks.
@@ -123,6 +156,37 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   // R11: feedback store (always available, no flag)
   private _feedbackStore: FeedbackStore;
+
+  // ─── Phase B-merge: silly-johnson subsystems (additive, all opt-in) ─────
+  // Lazy: only instantiated when config.features.* enables them, or never
+  //       (MCP/Hooks/OAuth need on-disk config files to activate)
+  private _claudeOAuthService: ClaudeOAuthService | null = null;
+  private _mcpClientManager: MCPClientManager | null = null;
+  private _hooksEngine: HooksEngine | null = null;
+  // Eager: instantiated by the constructor's restoration block, never null
+  private _checkpointManager!: CheckpointManager;
+  private _baselineRegistry!: BaselineRegistry;
+  private _autonomyGate!: AutonomyGate;
+  private _selfImprovementController!: SelfImprovementController;
+  private _learningEngine!: LearningEngine;
+  private _personalIntelligence!: PersonalIntelligence;
+  private _intelligenceHardening!: IntelligenceHardening;
+  private _adaptiveStatusService!: AdaptiveStatusService;
+  // Deferred: depend on subsystems wired in a later phase
+  private _memoryConsolidator: MemoryConsolidator | null = null;
+  private _vectorIndexService: VectorIndexService | null = null;
+  // Lazy: opt-in via config.features
+  private _globalLearningService: GlobalLearningService | null = null;
+  private _buildIntelligenceService: BuildIntelligenceService | null = null;
+  private _selfImprovementService: SelfImprovementService | null = null;
+  private _userPersonalizationService: UserPersonalizationService | null = null;
+  private _agentLoopEngine: AgentLoopEngine | null = null;
+  private _multiAgentSupervisor: MultiAgentBuildSupervisor | null = null;
+  // Reserved for future ModelFabric/HybridOrchestrator wiring; getters
+  // return null until a later phase wires them up against silly's
+  // multi-provider routing layer.
+  private _hybridOrchestrator: HybridOrchestrator | null = null;
+  private _modelFabric: ModelFabric | null = null;
 
   constructor(configPath?: string) {
     super();
@@ -308,6 +372,43 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     if (providerId === 'openai' && !process.env['OPENAI_API_KEY']) {
       log.warn({ providerId }, 'OPENAI_API_KEY not set — chat() will fail with PROVIDER_AUTH_MISSING. Set the env var or switch agent.defaultProvider to ollama.');
     }
+
+    // ─── Phase B-merge: silly-johnson restoration (additive subsystem init) ──
+    // Eager-init subsystems that have no external dependencies and no config
+    // flag. These are always available via getters; they're cheap to construct
+    // and have no runtime cost until something calls into them.
+    this._checkpointManager = new CheckpointManager(dataDir);
+    this._baselineRegistry = new BaselineRegistry(this.db as never);
+    this._autonomyGate = new AutonomyGate(dataDir);
+    this._selfImprovementController = new SelfImprovementController();
+    this._learningEngine = new LearningEngine(this.db as never);
+    this._personalIntelligence = new PersonalIntelligence(this.db as never);
+    this._intelligenceHardening = new IntelligenceHardening();
+    this._adaptiveStatusService = new AdaptiveStatusService();
+    // MemoryConsolidator and VectorIndexService both depend on subsystems
+    // that aren't initialised here yet (CategorizedMemoryStore + a concrete
+    // VectorIndexService implementation). They're left null and exposed via
+    // optional getters; later phases will wire them when CategorizedMemoryStore
+    // is integrated and the vector backend is chosen.
+
+    // Lazy: turn-on via config.features.* — preserves zero-overhead default.
+    const features = this.config.features;
+    if (features?.buildLearning) {
+      this._globalLearningService = new GlobalLearningService(this.db);
+      this._buildIntelligenceService = new BuildIntelligenceService(this._globalLearningService);
+    }
+    if (features?.builderV2) {
+      // Multi-agent supervisor takes optional ExecutionLimits, not the event bus.
+      this._multiAgentSupervisor = new MultiAgentBuildSupervisor();
+    }
+
+    log.info({
+      checkpoint: !!this._checkpointManager,
+      baseline: !!this._baselineRegistry,
+      autonomy: !!this._autonomyGate,
+      buildLearning: !!this._buildIntelligenceService,
+      builderV2: !!this._multiAgentSupervisor,
+    }, 'Phase B-merge subsystems initialized');
   }
 
   // Phase 4: observation-only orchestration. Pure side-effect on private fields.
@@ -491,6 +592,139 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   /** R5: Whether entity indexing is enabled for this agent. */
   isEntityIndexingEnabled(): boolean { return this._entityIndexingEnabled; }
+
+  // ─── Phase B-merge: silly-johnson getters (additive) ─────────────────────
+  // Each getter returns either the eagerly-initialised instance or null when
+  // the feature is opt-in and currently off. Web routes (lifted later) will
+  // call these to expose subsystem status to the dashboard.
+
+  getClaudeOAuthService(): ClaudeOAuthService | null { return this._claudeOAuthService; }
+  getMCPClientManager(): MCPClientManager | null { return this._mcpClientManager; }
+  getHooksEngine(): HooksEngine | null { return this._hooksEngine; }
+  getCheckpointManager(): CheckpointManager { return this._checkpointManager; }
+  getBaselineRegistry(): BaselineRegistry { return this._baselineRegistry; }
+  getAutonomyGate(): AutonomyGate { return this._autonomyGate; }
+  getSelfImprovementController(): SelfImprovementController { return this._selfImprovementController; }
+  getLearningEngine(): LearningEngine { return this._learningEngine; }
+  getPersonalIntelligence(): PersonalIntelligence { return this._personalIntelligence; }
+  getIntelligenceHardening(): IntelligenceHardening { return this._intelligenceHardening; }
+  getAdaptiveStatus(): AdaptiveStatusService { return this._adaptiveStatusService; }
+  getMemoryConsolidator(): MemoryConsolidator | null { return this._memoryConsolidator; }
+  getVectorIndexService(): VectorIndexService | null { return this._vectorIndexService; }
+  getGlobalLearningService(): GlobalLearningService | null { return this._globalLearningService; }
+  getBuildIntelligenceService(): BuildIntelligenceService | null { return this._buildIntelligenceService; }
+  getSelfImprovementService(): SelfImprovementService | null { return this._selfImprovementService; }
+  getUserPersonalizationService(): UserPersonalizationService | null { return this._userPersonalizationService; }
+  getAgentLoopEngine(): AgentLoopEngine | null { return this._agentLoopEngine; }
+  getMultiAgentSupervisor(): MultiAgentBuildSupervisor | null { return this._multiAgentSupervisor; }
+  getHybridOrchestrator(): HybridOrchestrator | null { return this._hybridOrchestrator; }
+  getModelFabric(): ModelFabric | null { return this._modelFabric; }
+
+  /** Direct access to the better-sqlite3 handle — used by routes that
+   * read silly-johnson tables (build_memory, agent_loops, etc.). */
+  getDatabase(): Database.Database { return this.db; }
+
+  /**
+   * Phase B-merge: feature flag introspection.
+   * Reads config.features.<name> with sensible defaults — `webSearch` and
+   * `toolCallEvaluator` default to true; everything else defaults to false.
+   * The dashboard Settings page calls this to render toggle state.
+   */
+  isFeatureEnabled(
+    name: 'builderV2' | 'buildLearning' | 'projectWorkflows' | 'toolCallEvaluator' | 'otelTracing' | 'otelContentTracing' | 'webSearch',
+  ): boolean {
+    const f = this.config.features;
+    if (!f) return name === 'webSearch' || name === 'toolCallEvaluator';
+    const explicit = f[name];
+    if (typeof explicit === 'boolean') return explicit;
+    return name === 'webSearch' || name === 'toolCallEvaluator';
+  }
+
+  /**
+   * Phase B-merge: hot-update feature flags from the Settings page.
+   * Mutates the in-memory config; persistence is the caller's responsibility.
+   */
+  updateFeatures(patch: Partial<NonNullable<AgentConfig['features']>>): void {
+    if (!this.config.features) {
+      this.config.features = { ...patch };
+    } else {
+      Object.assign(this.config.features, patch);
+    }
+    log.info({ patch }, 'Features updated');
+  }
+
+  /**
+   * Phase B-merge: create an isolated subagent for delegated work.
+   * Thin wrapper so web routes don't have to import the subagent module.
+   */
+  createSubagent(config: SubagentConfig): Subagent {
+    // Dynamic import to avoid making subagent a hard dep of this module
+    // when the agent-loop runtime isn't enabled.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createSubagent } = require('./agent-loop/subagent.js');
+    return createSubagent(config) as Subagent;
+  }
+
+  /**
+   * Phase B-merge: run an agent-loop goal end-to-end.
+   * Returns the final loop state. When agent-loop isn't initialised this
+   * throws — the dashboard should call getAgentLoopEngine() first to detect.
+   */
+  async runAgentLoop(description: string, sessionId?: string, constraints?: string[]): Promise<AgentLoopState> {
+    if (!this._agentLoopEngine) {
+      throw new Error('Agent-loop runtime is not enabled. Set config.features.builderV2 (or wire AgentLoopEngine in a future phase).');
+    }
+    const goal = {
+      description,
+      constraints: constraints ?? [],
+      sessionId: sessionId ?? 'default',
+    };
+    return this._agentLoopEngine.runLoop(goal as never) as unknown as AgentLoopState;
+  }
+
+  /**
+   * Phase B-merge: cancel all in-flight execution.
+   * Aborts every per-session AbortController and stops the agent-loop engine
+   * if running. Returns counts for the dashboard's "Stop all" button.
+   */
+  stopAllExecution(): { plansCancelled: number; sessionsAborted: number } {
+    let sessionsAborted = 0;
+    for (const [, controller] of this.sessionAbortControllers) {
+      controller.abort();
+      sessionsAborted++;
+    }
+    this.sessionAbortControllers.clear();
+    let plansCancelled = 0;
+    if (this._agentLoopEngine) {
+      const stopFn = (this._agentLoopEngine as unknown as { stopAll?: () => number }).stopAll;
+      if (typeof stopFn === 'function') plansCancelled = stopFn.call(this._agentLoopEngine) ?? 0;
+    }
+    log.info({ plansCancelled, sessionsAborted }, 'stopAllExecution called');
+    return { plansCancelled, sessionsAborted };
+  }
+
+  /**
+   * Phase B-merge: snapshot current execution state for the dashboard
+   * (Active sessions, agent-loop status). Cheap to call.
+   */
+  getExecutionStatus(): { activeSessions: number; agentLoopActive: boolean } {
+    return {
+      activeSessions: this.sessionAbortControllers.size,
+      agentLoopActive: this._agentLoopEngine !== null,
+    };
+  }
+
+  /**
+   * Phase B-merge: experience store for the agent-loop learning subsystem.
+   * Lazy-instantiated — first call wires it on top of this.db.
+   */
+  private _loopExperienceStore: LoopExperienceStore | null = null;
+  getLoopExperienceStore(): LoopExperienceStore {
+    if (!this._loopExperienceStore) {
+      this._loopExperienceStore = new LoopExperienceStore(this.db);
+    }
+    return this._loopExperienceStore;
+  }
 
   private registerBuiltinTools(): void {
     for (const tool of getBuiltinTools()) {
