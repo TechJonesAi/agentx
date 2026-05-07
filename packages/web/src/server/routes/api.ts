@@ -1330,6 +1330,55 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // Tier 2 batch A: POST /api/auth/claude/start — kick off PKCE/OAuth.
+        // Service is now eager-initialised in agent.ts. The handler:
+        //   - 500 if service unavailable (null guard preserved for defensive parity with silly)
+        //   - calls startAuthFlow(); fires-and-forgets waitForCompletion()
+        //     so the unhandled-rejection path can't crash the server
+        //   - returns { started, authUrl, callbackPort }
+        if (route === '/api/auth/claude/start' && method === 'POST') {
+          try {
+            const oauth = (agent as unknown as { getClaudeOAuthService?: () => {
+              startAuthFlow(): Promise<{ authUrl: string; state: string; callbackPort: number; waitForCompletion(): Promise<unknown> }>;
+            } | null }).getClaudeOAuthService?.();
+            if (!oauth) {
+              sendJson(res, 500, { error: 'Claude OAuth service unavailable' });
+              return;
+            }
+            const result = await oauth.startAuthFlow();
+            // Don't block the HTTP response on completion; client polls /status.
+            // Swallow rejection so user-cancel/timeout doesn't crash the process.
+            result.waitForCompletion().catch(() => { /* user cancel or timeout */ });
+            sendJson(res, 200, {
+              started: true,
+              authUrl: result.authUrl,
+              callbackPort: result.callbackPort,
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Tier 2 batch A: POST /api/auth/claude/disconnect — revoke + clear creds.
+        // Returns 200 in both wired and null-fallback cases (silly contract).
+        if (route === '/api/auth/claude/disconnect' && method === 'POST') {
+          try {
+            const oauth = (agent as unknown as { getClaudeOAuthService?: () => {
+              disconnect(): Promise<void>;
+            } | null }).getClaudeOAuthService?.();
+            if (!oauth) {
+              sendJson(res, 200, { disconnected: true, reason: 'service_unavailable' });
+              return;
+            }
+            await oauth.disconnect();
+            sendJson(res, 200, { disconnected: true });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // 5. GET /api/logs/llm-interactions/:id — single interaction lookup.
         // The list route /api/logs/llm-interactions already real (round 1).
         // This handler covers the per-id detail.

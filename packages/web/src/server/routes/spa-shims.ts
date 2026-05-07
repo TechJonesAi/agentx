@@ -47,10 +47,8 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   //  Only `/start` (Tier 2 — needs AgentLoopEngine instantiation) is shimmed.)
   { kind: 'exact', route: '/api/agent-loops/start' },
   // (`/api/agents/trace` now real — see api.ts.)
-  // (`/api/auth/claude/status` now real — see api.ts.
-  //  start/disconnect still shimmed (Tier 2 — needs OAuth service wiring).)
-  { kind: 'exact', route: '/api/auth/claude/start' },
-  { kind: 'exact', route: '/api/auth/claude/disconnect' },
+  // (`/api/auth/claude/{status,start,disconnect}` all now real — see api.ts.
+  //  ClaudeOAuthService is eager-instantiated in agent.ts (Tier 2 batch A).)
   // (`/api/builder/runs` and `/api/builder/queue` now real — see api.ts. The
   //  prefix below covers sub-paths like /runs/:id/cancel; the real top-level
   //  /runs handler in api.ts fires before the shim, so the prefix doesn't

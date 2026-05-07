@@ -138,13 +138,9 @@ describe('Tier 1 safe-batch — 5 newly-real routes', () => {
     expect(Array.isArray(r.body['entries'])).toBe(true);
   });
 
-  it('Tier 2 route POST /api/auth/claude/start is still shimmed (501)', async () => {
-    const router = createApiRouter(fakeAgent() as never);
-    const r = await call(router, 'POST', '/api/auth/claude/start');
-    expect(r.status).toBe(501);
-    expect(r.body['available']).toBe(false);
-  });
-
+  // (Sanity: confirm a still-shimmed Tier 2 route stays 501.
+  //  /api/auth/claude/start became real in Tier 2 batch A, so we use
+  //  /api/agent-loops/start which remains shimmed pending Tier 2 batch C.)
   it('Tier 2 route POST /api/agent-loops/start is still shimmed (501)', async () => {
     const router = createApiRouter(fakeAgent() as never);
     const r = await call(router, 'POST', '/api/agent-loops/start');

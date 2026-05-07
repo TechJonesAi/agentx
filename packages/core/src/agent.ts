@@ -268,6 +268,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       this.config.security.auditRetentionDays,
     );
     this.credentialManager = new CredentialManager(dataDir);
+    // Tier 2 batch A: instantiate ClaudeOAuthService with the existing
+    // CredentialManager. Construction has no I/O — Keychain reads happen
+    // lazily in getStatus()/disconnect()/startAuthFlow().
+    this._claudeOAuthService = new ClaudeOAuthService(this.credentialManager);
     this.encryption = new DataEncryption();
     this.localAuth = new LocalAuth(dataDir);
     this.dataManager = new DataManager(this.db);
