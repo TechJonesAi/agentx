@@ -88,6 +88,9 @@ import { AdvisorOrchestrator } from './memory/advisor-orchestrator.js';
 import { BuildSessionManager } from './memory/build-session.js';
 import { InteractionEvaluator } from './memory/interaction-evaluator.js';
 import { EmailIngestionService } from './email/index.js';
+import { EmailRunner } from './email/email-runner.js';
+import type { EmailSource } from './email/email-runner.js';
+import { createImapSource } from './email/imap-source.js';
 import { LLMInteractionLogger } from './observability/llm-interaction-logger.js';
 import { SystemLogBuffer } from './observability/system-log-buffer.js';
 import { ActionEngine } from './action-engine/index.js';
@@ -226,6 +229,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _screenshotManager!: RealScreenshotManager;
   // Lazy: depends on external config (Gmail Keychain) or circular refs
   private _emailIngestionService: EmailIngestionService | null = null;
+  private _emailRunner: EmailRunner | null = null;
   private _actionEngine: ActionEngine | null = null;
 
   constructor(configPath?: string) {
@@ -475,6 +479,22 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       this.auditLogger,
     );
 
+    // ── Email ingestion auto-start (opt-in via env) ────────────────────
+    // Default OFF. Only starts the polling loop when explicitly enabled.
+    // Polling cadence: AGENT_EMAIL_INGESTION_INTERVAL_MS, default 60s.
+    if (process.env['AGENT_EMAIL_INGESTION_ENABLED'] === 'true') {
+      try {
+        const runner = this.getEmailRunner();
+        const intervalMs = Number(process.env['AGENT_EMAIL_INGESTION_INTERVAL_MS'] ?? 60_000);
+        if (runner) {
+          runner.start(intervalMs);
+          log.info({ intervalMs }, 'Email ingestion auto-started');
+        }
+      } catch (err) {
+        log.warn({ err: String(err) }, 'Email ingestion auto-start failed (non-fatal)');
+      }
+    }
+
     log.info({
       checkpoint: !!this._checkpointManager,
       baseline: !!this._baselineRegistry,
@@ -717,6 +737,55 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       }
     }
     return this._emailIngestionService;
+  }
+
+  /**
+   * Lazy email runner — the actual ingestion engine that pulls from a
+   * (production: IMAP / tests: fixture) source and writes into the
+   * documents table so emails appear in the Memory Control Center.
+   * First call wires the runner against this agent's DB; the source can
+   * be overridden for tests via setEmailRunnerSource.
+   */
+  getEmailRunner(): EmailRunner | null {
+    if (this._emailRunner) return this._emailRunner;
+    try {
+      const svc = this.getEmailIngestionService();
+      const allow = svc?.getAllowlist() ?? { senders: [], domains: [] };
+      const cfg = svc?.getState().config ?? null;
+      // Default source: real IMAP. Will fail at runtime without a Keychain
+      // password — that's surfaced via lastError on the runner status, not
+      // by throwing here, so the server stays alive.
+      const source: EmailSource = cfg
+        ? createImapSource({
+            account: cfg.account,
+            host: cfg.host,
+            port: cfg.port,
+            secure: cfg.secure,
+          })
+        : async () => [];
+      this._emailRunner = new EmailRunner({
+        db: this.db as never,
+        source,
+        allowedSenders: allow.senders,
+        allowedDomains: allow.domains,
+        onIngested: this._entityIndexingEnabled
+          ? (id, text) => { this._entityIngestionService?.ingestDocument(id, text); }
+          : undefined,
+      });
+      return this._emailRunner;
+    } catch (err) {
+      log.warn({ err: String(err) }, 'EmailRunner init failed');
+      return null;
+    }
+  }
+
+  /**
+   * Override the email runner's source. Used by tests to inject a fixture
+   * source without touching IMAP. Call before any runOnce/start.
+   */
+  setEmailRunner(runner: EmailRunner): void {
+    if (this._emailRunner) this._emailRunner.stop();
+    this._emailRunner = runner;
   }
 
   /** Lazy action-engine — first call constructs with this agent passed in. */

@@ -491,18 +491,80 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
-        // Email page → status + allowlist (read-only, never triggers send)
+        // Email page — status now reports both the ingestion service config
+        // AND the runner's live state (running, lastRunAt, lastResult).
         if (route === '/api/email/status' && method === 'GET') {
           const svc = (agent as unknown as { getEmailIngestionService?: () => unknown | null }).getEmailIngestionService?.();
+          const runner = (agent as unknown as { getEmailRunner?: () => { getStatus(): unknown } | null }).getEmailRunner?.();
           if (!svc) {
-            sendJson(res, 200, { available: false, reason: 'Email ingestion not configured (no Keychain credential)', enabled: false });
+            sendJson(res, 200, {
+              available: false,
+              reason: 'Email ingestion not configured (no Keychain credential)',
+              enabled: false,
+              runner: runner?.getStatus?.() ?? null,
+            });
             return;
           }
           try {
             const state = (svc as { getState?: () => unknown }).getState?.() ?? null;
-            sendJson(res, 200, { available: true, enabled: true, state });
+            sendJson(res, 200, {
+              available: true,
+              enabled: process.env['AGENT_EMAIL_INGESTION_ENABLED'] === 'true',
+              state,
+              runner: runner?.getStatus?.() ?? null,
+            });
           } catch (e) {
             sendJson(res, 200, { available: true, enabled: false, error: String(e) });
+          }
+          return;
+        }
+
+        // Run a single ingestion cycle now (sync; returns the result).
+        if (route === '/api/email/run' && method === 'POST') {
+          const runner = (agent as unknown as { getEmailRunner?: () => { runOnce(): Promise<unknown> } | null }).getEmailRunner?.();
+          if (!runner) {
+            sendJson(res, 503, { ok: false, error: 'Email runner not available (Keychain or config missing)' });
+            return;
+          }
+          try {
+            const result = await runner.runOnce();
+            sendJson(res, 200, { ok: true, result });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Start the polling loop (background).
+        if (route === '/api/email/start' && method === 'POST') {
+          const runner = (agent as unknown as { getEmailRunner?: () => { start(ms?: number): void; getStatus(): unknown } | null }).getEmailRunner?.();
+          if (!runner) {
+            sendJson(res, 503, { ok: false, error: 'Email runner not available' });
+            return;
+          }
+          try {
+            const body = await parseBody(req).catch(() => ({}));
+            const intervalMs = Number((body as { intervalMs?: unknown }).intervalMs ?? 60_000);
+            runner.start(intervalMs);
+            sendJson(res, 200, { ok: true, status: runner.getStatus() });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Stop the polling loop.
+        if (route === '/api/email/stop' && method === 'POST') {
+          const runner = (agent as unknown as { getEmailRunner?: () => { stop(): void; getStatus(): unknown } | null }).getEmailRunner?.();
+          if (!runner) {
+            sendJson(res, 503, { ok: false, error: 'Email runner not available' });
+            return;
+          }
+          try {
+            runner.stop();
+            sendJson(res, 200, { ok: true, status: runner.getStatus() });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
           }
           return;
         }

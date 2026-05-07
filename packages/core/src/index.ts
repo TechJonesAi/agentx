@@ -20,6 +20,16 @@ export type {
   ExtractResult,
   UploadKind,
 } from './ingestion/upload-ingest.js';
+export { EmailRunner } from './email/email-runner.js';
+export type {
+  RawEmail,
+  EmailSource,
+  EmailRunResult,
+  EmailRunnerStatus,
+  EmailRunnerOptions,
+} from './email/email-runner.js';
+export { createImapSource } from './email/imap-source.js';
+export type { ImapSourceOptions } from './email/imap-source.js';
 export { FeedbackStore } from './memory/feedback-store.js';
 export type { FeedbackPayload, FeedbackRecord, FeedbackRating } from './memory/feedback-store.js';
 
