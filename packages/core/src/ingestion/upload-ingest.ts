@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { createLogger } from '../logger.js';
+import { extractTextFromBuffer, type BufferExtractionResult } from '../extraction/buffer-extractor.js';
 
 const log = createLogger('ingestion:upload');
 
@@ -96,94 +97,52 @@ function classifyByMagicBytes(buf: Buffer): UploadKind | null {
 }
 
 /**
- * Extract plain text from an uploaded buffer. Returns kind=unknown when the
- * type isn't recognised; the route handler should reject in that case.
+ * Extract plain text from an uploaded buffer. Delegates to the
+ * `extraction/buffer-extractor.ts` module which supports PDF, DOCX, EML,
+ * MSG, HTML, JSON, CSV, XML, TXT, MD. Returns the same ExtractResult
+ * shape as before so existing call sites stay stable.
+ *
+ * For full extraction details (status, provenance, warnings, email
+ * metadata) callers should import extractTextFromBuffer directly.
  */
 export async function extractTextFromUpload(
   buffer: Buffer,
   filename: string,
 ): Promise<ExtractResult> {
-  const warnings: string[] = [];
-  const magic = classifyByMagicBytes(buffer);
-  const named = classifyByName(filename);
-  // Magic bytes win when present.
-  const kind: UploadKind = magic ?? named;
+  const r = await extractTextFromBuffer(buffer, filename);
+  return adaptToLegacy(r);
+}
 
-  if (kind === 'pdf') {
-    try {
-      // Lazy import — pdf-parse is a heavy dep
-      const mod = (await import('pdf-parse')) as unknown as { default?: (b: Buffer) => Promise<{ text: string; numpages: number }> } & { (b: Buffer): Promise<{ text: string; numpages: number }> };
-      const fn = mod.default ?? (mod as unknown as (b: Buffer) => Promise<{ text: string; numpages: number }>);
-      const parsed = await fn(buffer);
-      return {
-        text: parsed.text ?? '',
-        kind: 'pdf',
-        fileType: 'pdf',
-        mimeType: 'application/pdf',
-        contentType: 'document',
-        pageCount: parsed.numpages ?? 1,
-        warnings,
-      };
-    } catch (err) {
-      warnings.push(`pdf-parse failed: ${err instanceof Error ? err.message : String(err)}`);
-      return {
-        text: '',
-        kind: 'pdf',
-        fileType: 'pdf',
-        mimeType: 'application/pdf',
-        contentType: 'document',
-        pageCount: 0,
-        warnings,
-      };
-    }
+/** Adapter that maps the rich BufferExtractionResult into the older ExtractResult shape. */
+function adaptToLegacy(r: BufferExtractionResult): ExtractResult {
+  // Map fileType to the legacy UploadKind
+  let kind: UploadKind;
+  if (r.fileType === 'pdf') kind = 'pdf';
+  else if (r.fileType === 'md') kind = 'markdown';
+  else if (r.fileType === 'txt' || r.fileType === 'html' || r.fileType === 'json'
+        || r.fileType === 'csv' || r.fileType === 'xml' || r.fileType === 'log'
+        || r.fileType === 'tsv' || r.fileType === 'eml' || r.fileType === 'msg'
+        || r.fileType === 'docx') {
+    // Anything textually-extracted gets bucketed as 'text' in the legacy enum
+    kind = 'text';
+  } else {
+    kind = 'unknown';
   }
-
-  if (kind === 'markdown') {
-    return {
-      text: buffer.toString('utf8'),
-      kind: 'markdown',
-      fileType: 'md',
-      mimeType: 'text/markdown',
-      contentType: 'document',
-      pageCount: 1,
-      warnings,
-    };
-  }
-
-  if (kind === 'text') {
-    const dot = filename.lastIndexOf('.');
-    const ext = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : 'txt';
-    return {
-      text: buffer.toString('utf8'),
-      kind: 'text',
-      fileType: ext,
-      mimeType: 'text/plain',
-      contentType: 'document',
-      pageCount: 1,
-      warnings,
-    };
-  }
-
-  // Unknown — try UTF-8 anyway as a last resort and warn loudly.
-  let asText = '';
-  try {
-    asText = buffer.toString('utf8');
-    if (/[\x00-\x08\x0e-\x1f]/.test(asText.slice(0, 4096))) {
-      // Has control bytes — treat as binary garbage
-      asText = '';
-    }
-  } catch { /* ignore */ }
-
   return {
-    text: asText,
-    kind: 'unknown',
-    fileType: 'bin',
-    mimeType: 'application/octet-stream',
-    contentType: 'document',
-    pageCount: asText ? 1 : 0,
-    warnings: [`unsupported file kind for ${filename}; treated as ${asText ? 'best-effort utf-8' : 'unreadable'}`],
+    text: r.text,
+    kind,
+    fileType: r.fileType,
+    mimeType: r.mimeType,
+    contentType: r.contentType,
+    pageCount: r.pageCount,
+    warnings: r.warnings,
   };
 }
+
+// (Legacy single-file extractor removed — extraction now lives in
+// extraction/buffer-extractor.ts which supports PDF/DOCX/EML/MSG/HTML/JSON/
+// CSV/XML/TXT/MD. This module's extractTextFromUpload thin-wraps it for
+// backwards compatibility with the older ExtractResult shape.)
 
 /**
  * Chunk text into ~1024-token segments with simple paragraph-aware splitting.
@@ -236,10 +195,16 @@ export async function ingestUploadedDocument(
   db: UploadIngestDb,
   args: IngestArgs,
 ): Promise<IngestResult> {
-  const { buffer, filename, title, originType } = args;
-  const extracted = await extractTextFromUpload(buffer, filename);
-  const text = extracted.text.trim();
-  const wordCount = text ? text.split(/\s+/).length : 0;
+  const { buffer, filename, title, originType, mimeHint } = args;
+  // Use the rich extractor directly so we get status/warnings/email metadata.
+  const rich = await extractTextFromBuffer(buffer, filename, mimeHint);
+  const extracted = adaptToLegacy(rich);
+  const text = rich.text.trim();
+  const wordCount = rich.wordCount || (text ? text.split(/\s+/).length : 0);
+  // EML/MSG uploads should land as origin_type='email' even if the caller
+  // didn't tell us that — the extractor knows the truth via magic bytes.
+  const finalOriginType = originType
+    ?? (rich.contentType === 'email' ? 'email' : 'upload');
 
   // Content hash of the full file bytes — primary dedupe key
   const contentHash = createHash('sha256').update(buffer).digest('hex');
@@ -257,11 +222,11 @@ export async function ingestUploadedDocument(
         fileType: extracted.fileType,
         mimeType: extracted.mimeType,
         contentType: extracted.contentType,
-        originType: originType ?? 'upload',
+        originType: finalOriginType,
         chunkCount: 0,
         wordCount,
         duplicateOf: existing.document_id,
-        warnings: extracted.warnings,
+        warnings: rich.warnings,
       };
     }
   } catch {
@@ -270,29 +235,45 @@ export async function ingestUploadedDocument(
 
   const documentId = makeDocumentId();
   const now = Date.now();
-  const titleFinal = title ?? filename.replace(/\.[^.]+$/, '');
+  // Email metadata (when present) populates richer columns
+  const emailMd = rich.emailMetadata;
+  const titleFinal = title
+    ?? emailMd?.subject
+    ?? filename.replace(/\.[^.]+$/, '');
+  const documentDate = emailMd?.date?.getTime() ?? now;
+  // Map extractor status → existing extraction_status text values
+  const extractionStatus =
+    rich.status === 'success' ? 'complete'
+      : rich.status === 'partial' ? 'partial'
+      : rich.status === 'unsupported' ? 'unsupported'
+      : 'failed';
 
   db.prepare(
     `INSERT INTO documents (
       document_id, file_name, file_type, mime_type, content_type, origin_type,
-      title, document_date, page_count, chunk_count, ocr_required, ocr_completed,
+      title, sender, sender_email, recipient, subject,
+      document_date, page_count, chunk_count, ocr_required, ocr_completed,
       classification_confidence, extraction_status, indexing_status,
       content_hash, ingested_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     documentId,
     filename,
     extracted.fileType,
     extracted.mimeType,
     extracted.contentType,
-    originType ?? 'upload',
+    finalOriginType,
     titleFinal,
-    now,
-    extracted.pageCount,
+    emailMd?.from ?? null,
+    emailMd?.fromEmail ?? null,
+    emailMd?.to ?? null,
+    emailMd?.subject ?? null,
+    documentDate,
+    rich.pageCount,
     0, // chunk_count, updated below
-    0, 0,
+    rich.provenance === 'ocr' ? 1 : 0, 0,
     0.0,
-    text ? 'complete' : 'failed',
+    extractionStatus,
     'pending',
     contentHash,
     now,
@@ -333,9 +314,9 @@ export async function ingestUploadedDocument(
     fileType: extracted.fileType,
     mimeType: extracted.mimeType,
     contentType: extracted.contentType,
-    originType: originType ?? 'upload',
+    originType: finalOriginType,
     chunkCount: chunks.length,
     wordCount,
-    warnings: extracted.warnings,
+    warnings: rich.warnings,
   };
 }

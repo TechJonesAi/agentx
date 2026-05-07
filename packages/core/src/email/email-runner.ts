@@ -27,6 +27,7 @@ import * as path from 'node:path';
 import { createLogger } from '../logger.js';
 import { resolveDataDir } from '../config.js';
 import { ingestUploadedDocument, type UploadIngestDb } from '../ingestion/upload-ingest.js';
+import { stripHtmlToText } from '../extraction/buffer-extractor.js';
 
 const log = createLogger('email:runner');
 
@@ -40,8 +41,21 @@ export interface RawEmail {
   date: Date;
   /** Plain-text body. Caller is responsible for stripping HTML if needed. */
   textBody: string;
+  /** When the email had no text/plain part, the source can supply HTML
+   *  here and the runner will strip it down to text. */
+  htmlBody?: string;
   /** Attachments list (paths only — already saved to disk by source). */
   attachmentPaths?: string[];
+  /**
+   * Optional inline attachments — when the source provides the bytes
+   * directly (e.g. mailparser's `attachments` array) the runner will
+   * ingest each as a separate document with origin_type='attachment'.
+   */
+  inlineAttachments?: Array<{
+    filename: string;
+    contentType?: string;
+    data: Buffer;
+  }>;
 }
 
 /**
@@ -182,14 +196,31 @@ export class EmailRunner {
             continue;
           }
 
-          // Ingest into documents table via the same upload helper
-          const buffer = Buffer.from(email.textBody, 'utf8');
+          // ── Body fallback: HTML when text/plain is missing ──
+          let bodyText = email.textBody ?? '';
+          if (!bodyText.trim() && email.htmlBody) {
+            bodyText = stripHtmlToText(email.htmlBody);
+            log.info({ messageId: email.messageId }, 'used HTML→text fallback for empty text body');
+          }
+          if (!bodyText.trim()) {
+            // Some emails (calendar invites, system notifications) have
+            // neither — that's still valid, just record an empty doc with
+            // a note.
+            bodyText = `[Email had no text or HTML body]\nFrom: ${email.from}\nSubject: ${email.subject}\nDate: ${email.date.toISOString()}`;
+          }
+
+          // Ingest into documents table via the same upload helper.
+          // The body is plain text (mailparser already extracted it) — we
+          // pass mimeHint='text/plain' so the buffer-extractor doesn't try
+          // to re-parse it as RFC822. The .eml suffix is for the Memory
+          // page's display only; classification is via mimeHint.
+          const buffer = Buffer.from(bodyText, 'utf8');
           const safeSubject = (email.subject || 'no-subject').slice(0, 60).replace(/[^\w\s.-]/g, '_');
-          const filename = `email-${email.date.toISOString().slice(0, 10)}-${safeSubject}.eml`;
+          const filename = `email-${email.date.toISOString().slice(0, 10)}-${safeSubject}.txt`;
           const ingest = await ingestUploadedDocument(this.db, {
             buffer,
             filename,
-            mimeHint: 'message/rfc822',
+            mimeHint: 'text/plain',
             title: email.subject || filename,
             originType: 'email',
           });
@@ -217,6 +248,38 @@ export class EmailRunner {
           }
 
           this.markProcessed(email.messageId);
+
+          // ── Attachment ingestion ──
+          // Each inline attachment becomes its own document with
+          // origin_type='attachment'. They share the parent email's date so
+          // they cluster nearby in the Memory list. Failures are logged
+          // but don't block the parent email's ingestion.
+          const attachmentDocIds: string[] = [];
+          if (email.inlineAttachments && email.inlineAttachments.length > 0) {
+            for (const att of email.inlineAttachments) {
+              try {
+                const attResult = await ingestUploadedDocument(this.db, {
+                  buffer: att.data,
+                  filename: att.filename,
+                  mimeHint: att.contentType,
+                  title: att.filename,
+                  originType: 'attachment',
+                });
+                if (!attResult.duplicateOf) {
+                  attachmentDocIds.push(attResult.documentId);
+                  try {
+                    this.db
+                      .prepare(
+                        `UPDATE documents SET sender = ?, sender_email = ?, document_date = ? WHERE document_id = ?`,
+                      )
+                      .run(email.from, email.fromEmail ?? null, email.date.getTime(), attResult.documentId);
+                  } catch { /* non-fatal */ }
+                }
+              } catch (err) {
+                log.warn({ err: String(err), filename: att.filename, parentMessageId: email.messageId }, 'attachment ingestion failed');
+              }
+            }
+          }
 
           if (ingest.duplicateOf) {
             // content-hash dedupe — already had identical bytes

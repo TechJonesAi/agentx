@@ -61,10 +61,13 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'exact', route: '/api/builder/artifacts' },
   // Multimodal chat (text-only chat is implemented)
   { kind: 'exact', route: '/api/chat/multimodal' },
-  // Cognitive (only /api/cognitive/status is implemented)
+  // (Cognitive routes implemented:
+  //   /api/cognitive/status, /api/cognitive/diagnostics,
+  //   /api/cognitive/documents, /api/cognitive/document/:id,
+  //   /api/cognitive/ingest, /api/cognitive/search
+  //  Books and ingest-book/run still shimmed — book-format support
+  //  needs a separate library lift.)
   { kind: 'prefix', prefix: '/api/cognitive/books' },
-  { kind: 'prefix', prefix: '/api/cognitive/document' },
-  // (`/api/cognitive/ingest` now real — see api.ts upload handler.)
   { kind: 'exact', route: '/api/cognitive/ingest-book' },
   { kind: 'exact', route: '/api/cognitive/run' },
   // Integrity / self-repair
@@ -79,7 +82,7 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'exact', route: '/api/mcp/allow-remote' },
   // (`/api/memory/control-center` and `/api/memory/gateway/query` now real
   //  — see memory-control-center.ts. Document-detail prefix still shimmed.)
-  { kind: 'prefix', prefix: '/api/memory/gateway/document' },
+  // (`/api/memory/gateway/document/:id` now real — see api.ts.)
   // (`/api/memory/stats` now real — see api.ts)
   // (`/api/memory/upload-document` now real — see api.ts upload handler.)
   // Model routing config

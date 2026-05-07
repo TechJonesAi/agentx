@@ -898,6 +898,56 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // ─── Cognitive document routes (real DB-backed; SPA Cognitive page) ─
+        // GET /api/cognitive/document/:id — returns the same MemoryDetail
+        //   shape that /api/memory/control-center/:id returns; the Cognitive
+        //   page expects this for individual documents.
+        // POST /api/cognitive/search { q, type? } — runs the same listing
+        //   used by gateway/query but exposed under the Cognitive namespace.
+        // GET /api/memory/gateway/document/:id — alias for the gateway API.
+        if (route.startsWith('/api/cognitive/document/') && method === 'GET') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 503, { error: 'no database' }); return; }
+            const rawId = decodeURIComponent(route.slice('/api/cognitive/document/'.length));
+            const id = rawId.startsWith('doc:') || rawId.startsWith('note:') ? rawId : `doc:${rawId}`;
+            const detail = getMemoryDetail(db, id);
+            if (!detail) { sendJson(res, 404, { error: `not found: ${id}` }); return; }
+            sendJson(res, 200, detail);
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route.startsWith('/api/memory/gateway/document/') && method === 'GET') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 503, { error: 'no database' }); return; }
+            const rawId = decodeURIComponent(route.slice('/api/memory/gateway/document/'.length));
+            const id = rawId.startsWith('doc:') || rawId.startsWith('note:') ? rawId : `doc:${rawId}`;
+            const detail = getMemoryDetail(db, id);
+            if (!detail) { sendJson(res, 404, { error: `not found: ${id}` }); return; }
+            sendJson(res, 200, detail);
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route === '/api/cognitive/search' && method === 'POST') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            if (!db) { sendJson(res, 200, { items: [], totalCount: 0 }); return; }
+            const body = await parseBody(req).catch(() => ({}));
+            const q = String((body as { q?: unknown }).q ?? '');
+            const type = (body as { type?: unknown }).type as string | undefined;
+            const result = listMemoryItems(db, { q, type, pageSize: 100 });
+            sendJson(res, 200, result);
+          } catch (e) {
+            sendJson(res, 500, { items: [], totalCount: 0, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // Cognitive diagnostics + documents (read-only DB views)
         if (route === '/api/cognitive/diagnostics' && method === 'GET') {
           try {
@@ -1132,7 +1182,10 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
                     filename: file.filename,
                     mimeHint: file.contentType,
                     title: parsed.fields['title'] || undefined,
-                    originType: parsed.fields['origin_type'] || 'upload',
+                    // Let ingestUploadedDocument auto-detect originType
+                    // ('email' for EML/MSG, 'upload' otherwise) when the
+                    // form didn't explicitly set one.
+                    originType: parsed.fields['origin_type'] || undefined,
                   },
                 );
                 // R5: run entity ingestion if enabled — uses the document's
