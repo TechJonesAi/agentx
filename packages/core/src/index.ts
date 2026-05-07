@@ -10,6 +10,13 @@ export { BaseLLMProvider, AnthropicProvider, OpenAIProvider, OllamaProvider, cre
 // Memory
 export { createDatabase, ConversationMemory, LongTermMemoryStore } from './memory/index.js';
 export { runCognitiveMemoryMigrations } from './db/migrations/index.js';
+// Tier 1 safe-batch re-exports — needed by web routes for /api/agent-loops/*,
+// /api/agents/trace, and /api/logs/llm-interactions/:id. Adding subpath
+// re-exports here is safer than relying on `@agentx/core/dist/...` deep
+// imports which break under vitest's prefix-matching alias.
+export { eventBus } from './agent-loop/event-bus.js';
+export { runtimeStateStore } from './agent-loop/runtime-state.js';
+export { LLMInteractionLogger } from './observability/llm-interaction-logger.js';
 export {
   ingestUploadedDocument,
   extractTextFromUpload,

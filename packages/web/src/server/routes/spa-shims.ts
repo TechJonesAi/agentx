@@ -42,14 +42,15 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   | { kind: 'exact'; route: string }
   | { kind: 'prefix'; prefix: string }
 > = [
-  // (`/api/agent-loops/{active,history,dashboard}` now real — see api.ts.
-  //  Only `/start` and `/events` and other sub-routes still shimmed.)
+  // (`/api/agent-loops/{active,history,dashboard,events}` and
+  //  `/api/agent-loops/:loopId` now real — see api.ts.
+  //  Only `/start` (Tier 2 — needs AgentLoopEngine instantiation) is shimmed.)
   { kind: 'exact', route: '/api/agent-loops/start' },
-  { kind: 'exact', route: '/api/agent-loops/events' },
-  // Agents trace
-  { kind: 'exact', route: '/api/agents/trace' },
-  // Claude auth flow
-  { kind: 'prefix', prefix: '/api/auth/claude' },
+  // (`/api/agents/trace` now real — see api.ts.)
+  // (`/api/auth/claude/status` now real — see api.ts.
+  //  start/disconnect still shimmed (Tier 2 — needs OAuth service wiring).)
+  { kind: 'exact', route: '/api/auth/claude/start' },
+  { kind: 'exact', route: '/api/auth/claude/disconnect' },
   // (`/api/builder/runs` and `/api/builder/queue` now real — see api.ts. The
   //  prefix below covers sub-paths like /runs/:id/cancel; the real top-level
   //  /runs handler in api.ts fires before the shim, so the prefix doesn't
@@ -72,9 +73,8 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'exact', route: '/api/cognitive/run' },
   // Integrity / self-repair
   { kind: 'prefix', prefix: '/api/integrity' },
-  // (`/api/logs/llm-interactions` and `/api/logs/system` now real — see api.ts.
-  //  Subroutes like /api/logs/llm-interactions/:id are still unimplemented.)
-  { kind: 'prefix', prefix: '/api/logs/llm-interactions/' },
+  // (`/api/logs/llm-interactions`, `/api/logs/llm-interactions/:id`, and
+  //  `/api/logs/system` now real — see api.ts.)
   // (`/api/mcp/servers` and `/api/mcp/tools` now real read-only — see api.ts.
   //  Real handlers fire first; the prefix below only catches sub-paths like
   //  /api/mcp/servers/:id at the matcher level.)

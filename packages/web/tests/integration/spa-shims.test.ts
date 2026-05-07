@@ -110,9 +110,12 @@ describe('SPA shims — pure matcher', () => {
     // real route in Phase D-prep round 1; repair / repair/:id still shimmed).
     expect(tryUnsupportedSpaShim('POST', '/api/integrity/repair')?.status).toBe(501);
     expect(tryUnsupportedSpaShim('GET', '/api/integrity/repair/abc-123')?.status).toBe(501);
-    // agent-loops/history is now real — use /start which is still shimmed.
+    // agent-loops/{history,events,active,dashboard,:id} now real (Tier 1) —
+    // /start is the only one still shimmed.
     expect(tryUnsupportedSpaShim('POST', '/api/agent-loops/start')?.status).toBe(501);
-    expect(tryUnsupportedSpaShim('GET', '/api/agent-loops/events')?.status).toBe(501);
+    // /api/auth/claude/{start,disconnect} are still shimmed (Tier 2);
+    // /api/auth/claude/status is real.
+    expect(tryUnsupportedSpaShim('POST', '/api/auth/claude/start')?.status).toBe(501);
     // validation/run is now real — apply / patches / rollback still shimmed.
     expect(tryUnsupportedSpaShim('POST', '/api/validation/apply')?.status).toBe(501);
     expect(tryUnsupportedSpaShim('POST', '/api/vision/analyze')?.status).toBe(501);

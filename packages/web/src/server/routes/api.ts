@@ -1244,6 +1244,109 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // ─── Tier 1 safe-batch routes — read-only, no agent.ts changes ──
+        // Each handler uses optional chaining and never throws. Deep
+        // imports avoid touching core/index.ts. All five routes were
+        // shimmed before; their backends already exist on the branch.
+
+        // 1. GET /api/agent-loops/events — recent eventBus history
+        if (route === '/api/agent-loops/events' && method === 'GET') {
+          try {
+            const { eventBus } = await import('@agentx/core');
+            const history = eventBus.getHistory(undefined, 50);
+            sendJson(res, 200, {
+              events: history.map((e) => ({
+                type: e.type,
+                payload: e.payload === undefined || e.payload === null
+                  ? ''
+                  : typeof e.payload === 'object'
+                    ? JSON.stringify(e.payload).slice(0, 100)
+                    : String(e.payload).slice(0, 100),
+                timestamp: e.timestamp,
+              })),
+            });
+          } catch (e) {
+            sendJson(res, 200, { events: [], error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // 2. GET /api/agent-loops/:loopId — runtime state for a single loop.
+        // Uses runtimeStateStore (active loops in memory + history).
+        const loopIdMatch = route.match(/^\/api\/agent-loops\/([^/]+)$/);
+        if (loopIdMatch && method === 'GET') {
+          // Skip well-known sub-routes that are already handled above
+          // (active, history, dashboard, events) — their match groups would
+          // collide with the regex. We exclude them explicitly.
+          const reserved = new Set(['active', 'history', 'dashboard', 'events', 'start']);
+          const loopId = decodeURIComponent(loopIdMatch[1]);
+          if (!reserved.has(loopId)) {
+            try {
+              const { runtimeStateStore } = await import('@agentx/core');
+              const active = runtimeStateStore.getActiveLoop(loopId);
+              if (active) { sendJson(res, 200, { loop: active }); return; }
+              const historyMatch = runtimeStateStore.getHistory().find((l) => l.loopId === loopId);
+              if (historyMatch) { sendJson(res, 200, { loop: historyMatch }); return; }
+              sendJson(res, 404, { error: `Agent loop not found: ${loopId}` });
+            } catch (e) {
+              sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+            }
+            return;
+          }
+        }
+
+        // 3. GET /api/agents/trace — orchestrator events from eventBus
+        if (route === '/api/agents/trace' && method === 'GET') {
+          try {
+            const u = new URL(url, 'http://x');
+            const limit = Math.max(1, Math.min(1000, Number(u.searchParams.get('limit') ?? 100) | 0));
+            const { eventBus } = await import('@agentx/core');
+            const all = eventBus.getHistory(undefined, limit);
+            const events = all.filter((e) => e.type.startsWith('agent.orchestrator.'));
+            sendJson(res, 200, { events, count: events.length });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // 4. GET /api/auth/claude/status — graceful when service is null.
+        // The agent's lazy getter currently returns null (OAuth service is
+        // declared but not instantiated until Tier 2). Until then this route
+        // returns the silly-documented `{connected: false, reason: 'service_unavailable'}`
+        // shape so the SPA Claude-auth panel renders correctly.
+        if (route === '/api/auth/claude/status' && method === 'GET') {
+          try {
+            const oauth = (agent as unknown as { getClaudeOAuthService?: () => { getStatus(): Promise<unknown> } | null }).getClaudeOAuthService?.();
+            if (!oauth) {
+              sendJson(res, 200, { connected: false, reason: 'service_unavailable' });
+              return;
+            }
+            const status = await oauth.getStatus();
+            sendJson(res, 200, status);
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // 5. GET /api/logs/llm-interactions/:id — single interaction lookup.
+        // The list route /api/logs/llm-interactions already real (round 1).
+        // This handler covers the per-id detail.
+        if (route.startsWith('/api/logs/llm-interactions/') && method === 'GET') {
+          try {
+            const id = route.slice('/api/logs/llm-interactions/'.length);
+            if (!id) { sendJson(res, 400, { error: 'id is required' }); return; }
+            const { LLMInteractionLogger } = await import('@agentx/core');
+            const rec = LLMInteractionLogger.getInstance().findById(decodeURIComponent(id));
+            if (!rec) { sendJson(res, 404, { error: 'Interaction not found' }); return; }
+            sendJson(res, 200, rec);
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // ─── SPA-known but unimplemented endpoints → 501 (Step 3) ───────
         // Returns a uniform JSON envelope so SPA panels can detect
         // `available: false` instead of guessing from `error` strings.
