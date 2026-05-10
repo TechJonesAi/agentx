@@ -17,6 +17,10 @@ export { runCognitiveMemoryMigrations } from './db/migrations/index.js';
 export { eventBus } from './agent-loop/event-bus.js';
 export { runtimeStateStore } from './agent-loop/runtime-state.js';
 export { LLMInteractionLogger } from './observability/llm-interaction-logger.js';
+// Tier 2 batch B re-exports — needed by web routes for /api/mcp/* writes.
+// These are route-level config helpers; no MCP runtime instantiation here.
+export { loadMCPConfig, saveMCPConfig, validateServerConfig } from './mcp/config.js';
+export type { MCPConfig, MCPServerConfig } from './mcp/types.js';
 export {
   ingestUploadedDocument,
   extractTextFromUpload,

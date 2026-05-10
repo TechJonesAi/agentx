@@ -16,7 +16,56 @@ import {
   bulkDeleteMemoryItems,
 } from './memory-control-center.js';
 import { parseMultipartBody, MultipartError } from '../multipart.js';
-import { ingestUploadedDocument } from '@agentx/core';
+import {
+  ingestUploadedDocument,
+  loadMCPConfig,
+  saveMCPConfig,
+  validateServerConfig,
+  resolveDataDir,
+  type MCPServerConfig,
+} from '@agentx/core';
+
+/**
+ * Tier 2 batch B helpers — body-size-capped JSON parser + name validator.
+ * Kept local to the MCP write handlers; do not modify the global parseBody
+ * because other routes don't need this specific shape today.
+ */
+const MCP_BODY_MAX_BYTES = 32 * 1024;
+const MCP_NAME_REGEX = /^[A-Za-z0-9_.-]{1,64}$/;
+const MCP_ALLOWED_FIELDS = new Set([
+  'command', 'args', 'url', 'transport', 'env', 'headers',
+  'description', 'safety', 'toolAllowlist', 'enabled',
+]);
+
+function readJsonCapped(req: http.IncomingMessage, maxBytes: number): Promise<{ body: Record<string, unknown>; error?: string }> {
+  return new Promise((resolve) => {
+    const ct = String(req.headers['content-type'] ?? '');
+    if (!/application\/json/i.test(ct)) {
+      resolve({ body: {}, error: 'content-type must be application/json' });
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let oversize = false;
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        oversize = true;
+        try { req.destroy(); } catch { /* ignore */ }
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (oversize) { resolve({ body: {}, error: `body too large: > ${maxBytes} bytes` }); return; }
+      const raw = Buffer.concat(chunks).toString('utf-8');
+      if (!raw) { resolve({ body: {} }); return; }
+      try { resolve({ body: JSON.parse(raw) as Record<string, unknown> }); }
+      catch { resolve({ body: {}, error: 'invalid JSON body' }); }
+    });
+    req.on('error', () => resolve({ body: {}, error: 'request stream error' }));
+  });
+}
 
 const log = createLogger('web:api');
 
@@ -793,6 +842,137 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             sendJson(res, 200, { tools: mcp?.listTools?.() ?? [], available: !!mcp });
           } catch (e) {
             sendJson(res, 200, { tools: [], available: false, error: String(e) });
+          }
+          return;
+        }
+
+        // ─── Tier 2 batch B — MCP write routes (Strategy 3) ─────────────
+        // These use route-level config-file access via loadMCPConfig /
+        // saveMCPConfig — no agent.ts wiring, no boot-time MCP instance
+        // required. When agent.getMCPClientManager() returns a live manager
+        // we ALSO call its mutation methods so a running process stays in
+        // sync; otherwise the new value takes effect on next restart.
+
+        // PUT /api/mcp/allow-remote — opt in/out of HTTPS MCP transport.
+        if (route === '/api/mcp/allow-remote' && method === 'PUT') {
+          const parsed = await readJsonCapped(req, MCP_BODY_MAX_BYTES);
+          if (parsed.error) { sendJson(res, 400, { error: parsed.error }); return; }
+          const newValue = parsed.body['allowRemote'] === true;
+          try {
+            const dataDir = resolveDataDir();
+            const cfg = loadMCPConfig(dataDir, { createIfMissing: true });
+            cfg.allowRemote = newValue;
+            saveMCPConfig(dataDir, cfg);
+            // Manager (when wired) reads allowRemote once at construct, so
+            // the running process won't pick up the new value without a
+            // restart. Reflect that honestly in the response.
+            sendJson(res, 200, { allowRemote: newValue, requiresRestart: true });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // PUT /api/mcp/servers/:name — upsert server config + optional toggle.
+        // DELETE /api/mcp/servers/:name — remove a server.
+        const mcpServerMatch = route.match(/^\/api\/mcp\/servers\/([^/]+)$/);
+        if (mcpServerMatch && (method === 'PUT' || method === 'DELETE')) {
+          const name = decodeURIComponent(mcpServerMatch[1]);
+          // Defensive name validation — blocks `..`, slashes, unsafe chars.
+          if (!MCP_NAME_REGEX.test(name)) {
+            sendJson(res, 400, { error: `Invalid server name. Must match ${MCP_NAME_REGEX} (got "${name}")` });
+            return;
+          }
+          const dataDir = resolveDataDir();
+          const mgr = (agent as unknown as { getMCPClientManager?: () => {
+            upsertServer(name: string, cfg: Partial<MCPServerConfig>): void;
+            setServerEnabled(name: string, enabled: boolean): Promise<void>;
+            removeServer(name: string): Promise<void>;
+          } | null }).getMCPClientManager?.();
+
+          if (method === 'DELETE') {
+            try {
+              const loaded = loadMCPConfig(dataDir, { createIfMissing: true });
+              // Deep-clone the mcpServers map: loadMCPConfig returns a shallow
+              // clone so mutating cfg.mcpServers also mutates DEFAULT_MCP_CONFIG.
+              const cfg = { ...loaded, mcpServers: { ...loaded.mcpServers } };
+              if (!cfg.mcpServers[name]) {
+                sendJson(res, 404, { error: `Unknown MCP server: ${name}` });
+                return;
+              }
+              delete cfg.mcpServers[name];
+              saveMCPConfig(dataDir, cfg);
+              if (mgr) { try { await mgr.removeServer(name); } catch (err) { log.warn({ err: String(err), name }, 'manager.removeServer failed (config still removed)'); } }
+              sendJson(res, 200, { name, removed: true });
+            } catch (e) {
+              sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+            }
+            return;
+          }
+
+          // PUT
+          const parsed = await readJsonCapped(req, MCP_BODY_MAX_BYTES);
+          if (parsed.error) { sendJson(res, 400, { error: parsed.error }); return; }
+          const body = parsed.body;
+          // Reject unknown fields (defense in depth — silly didn't do this).
+          const unknown = Object.keys(body).filter((k) => !MCP_ALLOWED_FIELDS.has(k));
+          if (unknown.length > 0) {
+            sendJson(res, 400, { error: `Unknown fields rejected: ${unknown.join(', ')}. Allowed: ${[...MCP_ALLOWED_FIELDS].join(', ')}` });
+            return;
+          }
+          const configFields = ['command', 'args', 'url', 'transport', 'env', 'headers', 'description', 'safety', 'toolAllowlist'] as const;
+          const hasConfigFields = configFields.some((k) => k in body);
+          const cfgPatch: Partial<MCPServerConfig> = {};
+          for (const k of configFields) if (k in body) (cfgPatch as Record<string, unknown>)[k] = body[k];
+
+          try {
+            // 1. Validate before persisting (when caller is creating/updating fields).
+            if (hasConfigFields) {
+              const errors = validateServerConfig(cfgPatch);
+              if (errors.length > 0) {
+                sendJson(res, 400, { error: `Invalid server config: ${errors.join('; ')}` });
+                return;
+              }
+            }
+            // 2. Apply via the file (always works whether mgr is wired or not).
+            //    Deep-clone mcpServers so we never mutate DEFAULT_MCP_CONFIG via
+            //    the shallow clone returned by loadMCPConfig.
+            const loaded = loadMCPConfig(dataDir, { createIfMissing: true });
+            const cfg = { ...loaded, mcpServers: { ...loaded.mcpServers } };
+            const existing = cfg.mcpServers[name];
+
+            // Refuse enabled-toggle on unknown server BEFORE any mutation.
+            if (typeof body['enabled'] === 'boolean' && !hasConfigFields && !existing) {
+              sendJson(res, 400, { error: `Cannot toggle enabled on unknown server: ${name}. Send command/url first.` });
+              return;
+            }
+
+            if (hasConfigFields) {
+              cfg.mcpServers[name] = {
+                ...(existing ?? {}),
+                ...cfgPatch,
+                enabled: existing?.enabled === true,
+              };
+            }
+            if (typeof body['enabled'] === 'boolean') {
+              cfg.mcpServers[name].enabled = body['enabled'] === true;
+            }
+            saveMCPConfig(dataDir, cfg);
+
+            // 3. Sync the running manager when present.
+            if (mgr) {
+              try {
+                if (hasConfigFields) mgr.upsertServer(name, cfgPatch);
+                if (typeof body['enabled'] === 'boolean') {
+                  await mgr.setServerEnabled(name, body['enabled']);
+                }
+              } catch (err) {
+                log.warn({ err: String(err), name }, 'manager mutation failed (config still saved)');
+              }
+            }
+            sendJson(res, 200, { name, ok: true });
+          } catch (e) {
+            sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
           }
           return;
         }

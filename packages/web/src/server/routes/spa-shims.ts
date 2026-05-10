@@ -73,11 +73,10 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'prefix', prefix: '/api/integrity' },
   // (`/api/logs/llm-interactions`, `/api/logs/llm-interactions/:id`, and
   //  `/api/logs/system` now real — see api.ts.)
-  // (`/api/mcp/servers` and `/api/mcp/tools` now real read-only — see api.ts.
-  //  Real handlers fire first; the prefix below only catches sub-paths like
-  //  /api/mcp/servers/:id at the matcher level.)
-  { kind: 'prefix', prefix: '/api/mcp/servers' },
-  { kind: 'exact', route: '/api/mcp/allow-remote' },
+  // (`/api/mcp/servers`, `/api/mcp/tools` (Tier 1), `/api/mcp/allow-remote`
+  //  (Tier 2 batch B PUT), and `/api/mcp/servers/:name` (Tier 2 batch B
+  //  PUT/DELETE) all now real — see api.ts. Unmatched MCP paths fall
+  //  through to the catch-all 404 with the safe envelope.)
   // (`/api/memory/control-center` and `/api/memory/gateway/query` now real
   //  — see memory-control-center.ts. Document-detail prefix still shimmed.)
   // (`/api/memory/gateway/document/:id` now real — see api.ts.)

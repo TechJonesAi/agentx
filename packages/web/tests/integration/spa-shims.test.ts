@@ -113,14 +113,13 @@ describe('SPA shims — pure matcher', () => {
     // agent-loops/{history,events,active,dashboard,:id} now real (Tier 1) —
     // /start is the only one still shimmed.
     expect(tryUnsupportedSpaShim('POST', '/api/agent-loops/start')?.status).toBe(501);
-    // (`/api/auth/claude/{status,start,disconnect}` all real in Tier 2 batch A.
-    //  Use a different still-shimmed sub-path under a prefix entry.)
-    expect(tryUnsupportedSpaShim('POST', '/api/mcp/servers/foo')?.status).toBe(501);
-    // validation/run is now real — apply / patches / rollback still shimmed.
+    // (`/api/auth/claude/*` all real in Tier 2 batch A.
+    //  `/api/mcp/{allow-remote, servers/:name}` all real in Tier 2 batch B.
+    //  Validation apply/patches/rollback still shimmed via /api/validation prefix.)
     expect(tryUnsupportedSpaShim('POST', '/api/validation/apply')?.status).toBe(501);
     expect(tryUnsupportedSpaShim('POST', '/api/vision/analyze')?.status).toBe(501);
-    // mcp/servers list is now real — sub-path still shimmed.
-    expect(tryUnsupportedSpaShim('GET', '/api/mcp/servers/foo')?.status).toBe(501);
+    // /api/builder/runs/:id sub-path still shimmed via /api/builder/runs prefix.
+    expect(tryUnsupportedSpaShim('GET', '/api/builder/runs/abc')?.status).toBe(501);
   });
 
   it('does NOT match implemented top-level endpoints', () => {
