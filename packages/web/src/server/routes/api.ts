@@ -1429,6 +1429,123 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // imports avoid touching core/index.ts. All five routes were
         // shimmed before; their backends already exist on the branch.
 
+        // ─── Tier 2 batch C: POST /api/agent-loops/start ────────────────
+        // Gated behind AGENTX_ENABLE_AGENT_LOOPS=true. Default OFF — when
+        // the env flag isn't set, returns 503 with a clear reason so the
+        // SPA Agent Loops page can render disabled state. This route
+        // blocks the HTTP request for up to 6 minutes (engine's internal
+        // maxDuration is 5 min; we add 1 min buffer then return 504).
+        if (route === '/api/agent-loops/start' && method === 'POST') {
+          if (process.env['AGENTX_ENABLE_AGENT_LOOPS'] !== 'true') {
+            sendJson(res, 503, { available: false, reason: 'agent_loops_disabled' });
+            return;
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = await parseBody(req);
+          } catch {
+            sendJson(res, 400, { error: 'Invalid JSON body' });
+            return;
+          }
+          // Goal validation
+          const goal = body['goal'];
+          if (typeof goal !== 'string' || goal.trim().length === 0) {
+            sendJson(res, 400, { error: 'Missing required field: goal (string)' });
+            return;
+          }
+          if (goal.length > 4000) {
+            sendJson(res, 400, { error: `Goal exceeds 4000-character limit (got ${goal.length})` });
+            return;
+          }
+          // Constraints validation
+          const constraintsRaw = body['constraints'];
+          let constraints: string[] | undefined;
+          if (constraintsRaw !== undefined) {
+            if (!Array.isArray(constraintsRaw)) {
+              sendJson(res, 400, { error: 'constraints must be an array of strings' });
+              return;
+            }
+            if (constraintsRaw.length > 50) {
+              sendJson(res, 400, { error: `constraints exceeds 50-item limit (got ${constraintsRaw.length})` });
+              return;
+            }
+            const filtered: string[] = [];
+            for (const c of constraintsRaw) {
+              if (typeof c !== 'string') continue;
+              if (c.length > 256) {
+                sendJson(res, 400, { error: `constraint exceeds 256-char limit (one item is ${c.length})` });
+                return;
+              }
+              filtered.push(c);
+            }
+            constraints = filtered;
+          }
+          const sessionId = typeof body['sessionId'] === 'string' ? body['sessionId'] as string : undefined;
+
+          // Server-side timeout — 6 minutes (slightly above engine's 5-min cap).
+          const TIMEOUT_MS = 6 * 60 * 1000;
+          const TIMEOUT_SENTINEL = Symbol('agent-loops-timeout');
+          try {
+            type LoopState = {
+              loopId?: string;
+              status?: string;
+              plan?: { tasks?: Array<{ action?: string; description?: string }>; reasoning?: string; expectedOutcome?: string };
+              currentStep?: number;
+              totalDuration?: number;
+              executionResults?: Array<{ success?: boolean; output?: unknown; error?: string }>;
+              reflections?: Array<{ analysis?: string }>;
+              finalOutcome?: { success?: boolean; summary?: string };
+            };
+            const runP = (agent as unknown as { runAgentLoop(d: string, s?: string, c?: string[]): Promise<LoopState> })
+              .runAgentLoop(goal.trim(), sessionId, constraints);
+            const timeoutP = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
+              const t = setTimeout(() => resolve(TIMEOUT_SENTINEL), TIMEOUT_MS);
+              // Don't keep the process alive just for this timer.
+              if (typeof t.unref === 'function') t.unref();
+            });
+            const raced = await Promise.race([runP, timeoutP]);
+            if (raced === TIMEOUT_SENTINEL) {
+              sendJson(res, 504, { error: 'Agent loop timed out' });
+              return;
+            }
+            const result = raced as LoopState;
+            // Build findings[] per silly's contract
+            const tasks = result.plan?.tasks ?? [];
+            const execResults = result.executionResults ?? [];
+            const reflections = result.reflections ?? [];
+            const findings: Array<{ step: number; action: string; description: string; outcome: string; analysis: string; output?: unknown }> = [];
+            for (let i = 0; i < tasks.length && i < execResults.length; i++) {
+              const t = tasks[i];
+              const ex = execResults[i];
+              const refl = reflections[i];
+              findings.push({
+                step: i + 1,
+                action: String(t.action ?? ''),
+                description: String(t.description ?? ''),
+                outcome: ex.success ? 'success' : 'failed',
+                analysis: refl?.analysis ?? (ex.success ? 'Completed.' : (ex.error || 'Failed.')),
+                output: ex.output,
+              });
+            }
+            sendJson(res, 200, {
+              loopId: result.loopId,
+              status: result.status,
+              success: result.finalOutcome?.success ?? false,
+              summary: result.finalOutcome?.summary ?? '',
+              steps: result.currentStep,
+              duration: result.totalDuration,
+              tasks: tasks.map((t) => ({ action: t.action, description: t.description })),
+              reasoning: result.plan?.reasoning ?? '',
+              expectedOutcome: result.plan?.expectedOutcome ?? '',
+              findings,
+            });
+          } catch (e) {
+            log.error({ err: String(e) }, 'agent loop start failed');
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // 1. GET /api/agent-loops/events — recent eventBus history
         if (route === '/api/agent-loops/events' && method === 'GET') {
           try {

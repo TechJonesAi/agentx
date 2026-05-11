@@ -808,7 +808,44 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getBuildIntelligenceService(): BuildIntelligenceService | null { return this._buildIntelligenceService; }
   getSelfImprovementService(): SelfImprovementService | null { return this._selfImprovementService; }
   getUserPersonalizationService(): UserPersonalizationService | null { return this._userPersonalizationService; }
-  getAgentLoopEngine(): AgentLoopEngine | null { return this._agentLoopEngine; }
+  /**
+   * Tier 2 batch C: lazy-instantiate the AgentLoopEngine on first call.
+   *
+   * Construction is deferred until something actually requests the engine
+   * (POST /api/agent-loops/start). This keeps server boot cheap, avoids
+   * paying the AgentLoopPlanner/Executor/Reflector cost when loops are
+   * unused, and isolates any init failure to the user-triggered route
+   * rather than blocking the server from starting.
+   *
+   * All context fields point to already-initialised privates on this
+   * agent. No I/O happens here.
+   */
+  getAgentLoopEngine(): AgentLoopEngine | null {
+    if (this._agentLoopEngine) return this._agentLoopEngine;
+    try {
+      const engine = new AgentLoopEngine({
+        llmProvider: this.provider,
+        toolRegistry: this.toolRegistry,
+        longTermMemory: this.longTermMemory,
+        eventBus: agentLoopEventBus,
+        memoryIngestionEngine: this._memoryIngestionEngine,
+        autonomyGate: this._autonomyGate,
+        checkpointManager: this._checkpointManager,
+        experienceStore: this.getLoopExperienceStore(),
+      });
+      // Optional capability setters — strengthen the engine when these
+      // subsystems are wired. Each setter is a no-op when its dep is null.
+      try { engine.setLearningEngine(this._learningEngine); } catch { /* */ }
+      try { engine.setEpisodeStore(this._episodeStore); } catch { /* */ }
+      try { engine.setKnowledgeFlow(this._knowledgeFlowEngine); } catch { /* */ }
+      this._agentLoopEngine = engine;
+      log.info('AgentLoopEngine lazy-initialised');
+      return this._agentLoopEngine;
+    } catch (err) {
+      log.warn({ err: String(err) }, 'AgentLoopEngine lazy-init failed');
+      return null;
+    }
+  }
   getMultiAgentSupervisor(): MultiAgentBuildSupervisor | null { return this._multiAgentSupervisor; }
   getHybridOrchestrator(): HybridOrchestrator | null { return this._hybridOrchestrator; }
   getModelFabric(): ModelFabric | null { return this._modelFabric; }
@@ -864,15 +901,18 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
    * throws — the dashboard should call getAgentLoopEngine() first to detect.
    */
   async runAgentLoop(description: string, sessionId?: string, constraints?: string[]): Promise<AgentLoopState> {
-    if (!this._agentLoopEngine) {
-      throw new Error('Agent-loop runtime is not enabled. Set config.features.builderV2 (or wire AgentLoopEngine in a future phase).');
+    // Tier 2 batch C: route through the lazy-init getter so the engine
+    // is built on first use rather than at server boot.
+    const engine = this.getAgentLoopEngine();
+    if (!engine) {
+      throw new Error('Agent-loop runtime is not available (lazy init failed).');
     }
     const goal = {
       description,
       constraints: constraints ?? [],
       sessionId: sessionId ?? 'default',
     };
-    return this._agentLoopEngine.runLoop(goal as never) as unknown as AgentLoopState;
+    return engine.runLoop(goal as never) as unknown as AgentLoopState;
   }
 
   /**

@@ -42,10 +42,11 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   | { kind: 'exact'; route: string }
   | { kind: 'prefix'; prefix: string }
 > = [
-  // (`/api/agent-loops/{active,history,dashboard,events}` and
-  //  `/api/agent-loops/:loopId` now real — see api.ts.
-  //  Only `/start` (Tier 2 — needs AgentLoopEngine instantiation) is shimmed.)
-  { kind: 'exact', route: '/api/agent-loops/start' },
+  // (All /api/agent-loops/* routes now real — see api.ts:
+  //   GET /active, /history, /dashboard, /events, /:loopId  (Tier 1)
+  //   POST /start                                            (Tier 2 batch C)
+  //  /start is gated behind AGENTX_ENABLE_AGENT_LOOPS=true; when disabled
+  //  it returns 503 with reason:agent_loops_disabled, not a shim envelope.)
   // (`/api/agents/trace` now real — see api.ts.)
   // (`/api/auth/claude/{status,start,disconnect}` all now real — see api.ts.
   //  ClaudeOAuthService is eager-instantiated in agent.ts (Tier 2 batch A).)
