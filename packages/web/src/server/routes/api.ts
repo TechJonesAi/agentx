@@ -1230,6 +1230,34 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // ─── Tier 3 Builder Batch 1: GET /api/builder/artifacts ─────────
+        // Defensive read of the `build_artifacts` table. The table is
+        // created inside silly-johnson's createDatabase but isn't part of
+        // main's schema yet (no migration in this batch). When the table
+        // is absent OR the DB handle is unavailable, returns {artifacts:[]}
+        // instead of 500. Hard cap of 100 rows, newest first.
+        if (route === '/api/builder/artifacts' && method === 'GET') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => { prepare(s: string): { all(...a: unknown[]): unknown[] } } }).getDatabase?.();
+            if (!db) {
+              sendJson(res, 200, { artifacts: [] });
+              return;
+            }
+            try {
+              const rows = db
+                .prepare(`SELECT * FROM build_artifacts ORDER BY created_at DESC LIMIT 100`)
+                .all();
+              sendJson(res, 200, { artifacts: rows });
+            } catch {
+              // Table absent or schema mismatch — degrade to empty list.
+              sendJson(res, 200, { artifacts: [] });
+            }
+          } catch (e) {
+            sendJson(res, 200, { artifacts: [], error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // Memory stats — basic counts from the DB. Real cognitive memory
         // statistics (working set, episodes, etc.) come later when we wire
         // CategorizedMemoryStore reporting fully.

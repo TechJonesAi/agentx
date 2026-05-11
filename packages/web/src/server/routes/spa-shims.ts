@@ -58,7 +58,8 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'exact', route: '/api/builder/queue/cancel' },
   { kind: 'exact', route: '/api/builder/queue/clear' },
   { kind: 'exact', route: '/api/builder/run' },
-  { kind: 'exact', route: '/api/builder/artifacts' },
+  // (`/api/builder/artifacts` now real — see api.ts. Defensive read; returns
+  //  {artifacts: []} when the build_artifacts table is absent.)
   // Multimodal chat (text-only chat is implemented)
   { kind: 'exact', route: '/api/chat/multimodal' },
   // (Cognitive routes implemented:
