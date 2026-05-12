@@ -35,9 +35,13 @@ interface AvailabilityState {
 interface ProviderStatus {
   provider: string;
   model: string | null;
+  configuredModel?: string | null;
   ready: boolean;
   reason?: string;
   hint?: string;
+  availableModels?: Array<{ name: string; size?: number }>;
+  recommendedModel?: string | null;
+  installedCount?: number;
 }
 
 async function probe(url: string): Promise<boolean> {
@@ -208,10 +212,50 @@ export function ChatSidebar(): React.JSX.Element {
               ● {provider.ready ? 'ready' : 'unavailable'}
             </span>
           </div>
+          {/* Local Ollama details — installed count, recommended model */}
+          {provider.provider === 'ollama' && typeof provider.installedCount === 'number' && (
+            <div style={{ marginTop: '6px', color: 'var(--text-tertiary, #6e7681)', fontSize: '11px' }}>
+              {provider.installedCount} local model{provider.installedCount === 1 ? '' : 's'} installed
+              {provider.recommendedModel && provider.recommendedModel !== provider.model
+                ? <> · recommended: <strong style={{ color: '#3fb950' }}>{provider.recommendedModel}</strong></>
+                : null}
+            </div>
+          )}
           {!provider.ready && (provider.reason || provider.hint) && (
             <div style={{ marginTop: '6px', color: 'var(--text-secondary, #8b949e)', lineHeight: 1.4, fontSize: '11px' }}>
               {provider.reason ? <div>{provider.reason}</div> : null}
               {provider.hint ? <div style={{ marginTop: '4px', color: '#d29922' }}>{provider.hint}</div> : null}
+              {provider.provider === 'ollama' && provider.recommendedModel && !provider.ready && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const r = await fetch('/api/agent/provider/select-local-model', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ model: provider.recommendedModel }),
+                      });
+                      if (r.ok) {
+                        // Re-fetch status to reflect persisted change.
+                        const s = await fetch('/api/agent/provider/status');
+                        if (s.ok) setProvider(await s.json() as ProviderStatus);
+                      }
+                    } catch { /* ignore */ }
+                  }}
+                  style={{
+                    marginTop: '6px',
+                    padding: '4px 8px',
+                    background: 'var(--bg-primary, #0d1117)',
+                    color: '#3fb950',
+                    border: '1px solid #1b3a2d',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Use {provider.recommendedModel}
+                </button>
+              )}
             </div>
           )}
         </div>

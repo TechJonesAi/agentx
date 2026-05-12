@@ -242,10 +242,9 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             const config = agent.getConfig();
             const providerId = config.agent.defaultProvider;
             // Prefer per-provider model when the default agent.model belongs
-            // to a different provider family (e.g. defaultProvider=ollama
-            // but agent.model=claude-sonnet-*). Heuristic: if the agent
-            // model name doesn't start with a known prefix for this
-            // provider, fall back to providers[id].model.
+            // to a different provider family. Heuristic: if the agent model
+            // name doesn't start with a known prefix for this provider,
+            // fall back to providers[id].model.
             const providerModel = config.providers?.[providerId]?.model ?? null;
             const agentModel = config.agent.model ?? null;
             const matchesProvider =
@@ -254,40 +253,174 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               providerId === 'openai'    ? /^(gpt|o\d)/i.test(agentModel) :
               providerId === 'ollama'    ? !/^claude|^gpt|^o\d/i.test(agentModel) :
               false;
-            const model = matchesProvider ? agentModel : (providerModel ?? agentModel);
-            let ready = false;
-            let reason: string | undefined;
+            const configuredModel = matchesProvider ? agentModel : (providerModel ?? agentModel);
+
+            interface ProviderStatusResponse {
+              provider: string;
+              model: string | null;
+              configuredModel?: string | null;
+              ready: boolean;
+              reason?: string;
+              hint?: string;
+              availableModels?: Array<{ name: string; size?: number }>;
+              recommendedModel?: string | null;
+              installedCount?: number;
+            }
+            const out: ProviderStatusResponse = {
+              provider: providerId,
+              model: configuredModel,
+              ready: false,
+            };
+
             if (providerId === 'anthropic') {
-              ready = !!process.env['ANTHROPIC_API_KEY'];
-              if (!ready) reason = 'ANTHROPIC_API_KEY not set';
+              out.ready = !!process.env['ANTHROPIC_API_KEY'];
+              if (!out.ready) {
+                out.reason = 'ANTHROPIC_API_KEY not set';
+                out.hint = 'Set AGENT_DEFAULT_PROVIDER=ollama (and start Ollama) to use a local model without an API key.';
+              }
             } else if (providerId === 'openai') {
-              ready = !!process.env['OPENAI_API_KEY'];
-              if (!ready) reason = 'OPENAI_API_KEY not set';
+              out.ready = !!process.env['OPENAI_API_KEY'];
+              if (!out.ready) {
+                out.reason = 'OPENAI_API_KEY not set';
+                out.hint = 'Set AGENT_DEFAULT_PROVIDER=ollama (and start Ollama) to use a local model without an API key.';
+              }
             } else if (providerId === 'ollama') {
-              // Probe Ollama liveness — one-shot, 3s timeout.
+              // Probe Ollama liveness + enumerate installed models. 3s budget.
+              const host = process.env['OLLAMA_HOST'] ?? 'http://127.0.0.1:11434';
+              let installed: Array<{ name: string; size?: number }> = [];
+              let live = false;
               try {
-                const host = process.env['OLLAMA_HOST'] ?? 'http://127.0.0.1:11434';
                 const r = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(3000) });
-                ready = r.ok;
-                if (!ready) reason = `Ollama returned HTTP ${r.status}`;
+                if (r.ok) {
+                  live = true;
+                  const j = (await r.json().catch(() => ({}))) as { models?: Array<{ name?: string; size?: number }> };
+                  installed = (j?.models ?? [])
+                    .filter((m): m is { name: string; size?: number } => typeof m?.name === 'string')
+                    .map((m) => ({ name: m.name, size: typeof m.size === 'number' ? m.size : undefined }));
+                } else {
+                  out.reason = `Ollama returned HTTP ${r.status}`;
+                }
               } catch (err) {
-                ready = false;
-                reason = `Ollama unreachable: ${err instanceof Error ? err.message : String(err)}`;
+                out.reason = `Ollama unreachable: ${err instanceof Error ? err.message : String(err)}`;
+              }
+
+              out.availableModels = installed;
+              out.installedCount = installed.length;
+              out.configuredModel = configuredModel;
+
+              if (!live) {
+                out.ready = false;
+                out.hint = 'Start Ollama (e.g. `ollama serve`) or set OLLAMA_HOST to a reachable instance.';
+              } else if (installed.length === 0) {
+                out.ready = false;
+                out.reason = 'Ollama is running but no models are installed.';
+                out.hint = 'Pull a model, e.g. `ollama pull qwen2.5-coder:32b` or `ollama pull llama3.1:8b`.';
+              } else {
+                // Verify the configured model is installed. Accept either an
+                // exact match or a prefix match (Ollama tags carry size
+                // suffixes like ":32b", ":70b-instruct-q4_K_M"). Case-
+                // insensitive compare but return the original-case tag
+                // from the installed list.
+                const wantedLower = (configuredModel ?? '').toLowerCase();
+                const exactMatchEntry = installed.find((m) => m.name.toLowerCase() === wantedLower);
+                const prefixMatchEntry = wantedLower
+                  ? installed.find((m) => m.name.toLowerCase().startsWith(wantedLower + ':'))
+                  : undefined;
+                const exactMatch = !!exactMatchEntry;
+                const prefixMatch = prefixMatchEntry?.name;
+                const present = exactMatch || !!prefixMatch;
+
+                // Recommendation: prefer coding/reasoning models when present.
+                // Walk a priority list of prefix patterns; pick the first
+                // installed model whose name starts with one of them.
+                const preferenceRegexes: RegExp[] = [
+                  /^qwen2\.5-coder/i,
+                  /^qwen3-coder/i,
+                  /^qwen2\.5/i,
+                  /^qwen3/i,
+                  /^llama3\.3/i,
+                  /^llama3\.1/i,
+                  /^deepseek-coder/i,
+                  /^deepseek/i,
+                  /^codestral/i,
+                  /^mistral/i,
+                  /^llama3/i,
+                  /^gemma/i,
+                ];
+                let recommended: string | null = null;
+                for (const rx of preferenceRegexes) {
+                  const hit = installed.find((m) => rx.test(m.name));
+                  if (hit) { recommended = hit.name; break; }
+                }
+                // Fallback — any installed model.
+                if (!recommended && installed[0]) recommended = installed[0].name;
+                out.recommendedModel = recommended;
+
+                if (present) {
+                  out.ready = true;
+                  out.model = exactMatch ? exactMatchEntry!.name : prefixMatch!;
+                } else {
+                  out.ready = false;
+                  out.reason = `Configured model '${configuredModel ?? '(none)'}' is not installed on Ollama (${installed.length} model${installed.length === 1 ? '' : 's'} available).`;
+                  out.hint = recommended
+                    ? `Use the installed '${recommended}' (POST /api/agent/provider/select-local-model {"model":"${recommended}"}) or pull the configured model with \`ollama pull ${configuredModel}\`.`
+                    : `Pull the configured model with \`ollama pull ${configuredModel}\`.`;
+                }
               }
             }
-            sendJson(res, 200, {
-              provider: providerId,
-              model,
-              ready,
-              reason,
-              // Hint the user about local fallback when the default isn't ready.
-              hint: ready ? undefined
-                : (providerId !== 'ollama'
-                    ? 'Set AGENT_DEFAULT_PROVIDER=ollama (and start Ollama) to use a local model without an API key.'
-                    : 'Start Ollama (e.g. `ollama serve`) or set OLLAMA_HOST to a reachable instance.'),
-            });
+
+            sendJson(res, 200, out);
           } catch (e) {
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // POST /api/agent/provider/select-local-model
+        //   Body: { "model": "<ollama-model-name>" }
+        //   Verifies the model exists on Ollama, then persists it as the
+        //   `forceModel` in routing.json. Does NOT modify agent.defaultProvider
+        //   or rewrite ~/.agentx/config.yaml. The agent picks up forceModel
+        //   on next chat call via the routing-config path (Strategy 3).
+        //
+        // Safe-by-design:
+        //   - Only writes to ~/.agentx/routing.json
+        //   - Refuses if the model isn't listed in /api/tags
+        //   - 32 KB body cap (readJsonCapped)
+        //   - Never restarts the agent or rewrites the main config
+        if (route === '/api/agent/provider/select-local-model' && method === 'POST') {
+          const { body, error } = await readJsonCapped(req, 32 * 1024);
+          if (error) { sendJson(res, 400, { error }); return; }
+          const wanted = typeof body['model'] === 'string' ? (body['model'] as string).trim() : '';
+          if (!wanted) { sendJson(res, 400, { error: 'model field is required' }); return; }
+          // Verify against live Ollama tags
+          const host = process.env['OLLAMA_HOST'] ?? 'http://127.0.0.1:11434';
+          let installed: string[] = [];
+          try {
+            const r = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(5000) });
+            if (!r.ok) { sendJson(res, 502, { error: `Ollama returned HTTP ${r.status}` }); return; }
+            const j = (await r.json().catch(() => ({}))) as { models?: Array<{ name?: string }> };
+            installed = (j?.models ?? []).map((m) => m?.name ?? '').filter(Boolean);
+          } catch (err) {
+            sendJson(res, 502, { error: `Ollama unreachable: ${err instanceof Error ? err.message : String(err)}` });
+            return;
+          }
+          if (!installed.includes(wanted)) {
+            sendJson(res, 400, {
+              error: `Model '${wanted}' is not installed on Ollama.`,
+              availableModels: installed,
+            });
+            return;
+          }
+          // Persist as routing forceModel via Strategy 3 (no agent.ts touch).
+          try {
+            const dataDir = resolveDataDir();
+            const current = loadRoutingConfig(dataDir);
+            const next = { ...current, forceModel: wanted };
+            saveRoutingConfig(dataDir, next);
+            sendJson(res, 200, { ok: true, model: wanted, persistedTo: 'routing.json forceModel' });
+          } catch (err) {
+            sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
           }
           return;
         }
