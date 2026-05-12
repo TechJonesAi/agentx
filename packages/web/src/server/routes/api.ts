@@ -22,6 +22,10 @@ import {
   saveMCPConfig,
   validateServerConfig,
   resolveDataDir,
+  loadRoutingConfig,
+  saveRoutingConfig,
+  validateRoutingConfig,
+  probeOllamaModels,
   type MCPServerConfig,
 } from '@agentx/core';
 
@@ -1276,6 +1280,54 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             if (!queue) { sendJson(res, 503, { error: 'Build queue not available' }); return; }
             const cleared = queue.clearQueue();
             sendJson(res, 200, { cleared, state: queue.getState() });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // ─── Tier 3 Models/Routing Batch: GET/POST /api/models/routing ──
+        // Strategy 3 — route-level read/write of `~/.agentx/routing.json`.
+        // No agent.ts instantiation. ModelFabric is null on this branch;
+        // the route surface mirrors silly's so the Settings UI can render
+        // the routing table even when the runtime fabric is offline.
+        //
+        // GET returns: { policy, availableModels, ollama: { reachable, host } }
+        //   - policy:           merged defaults + persisted routing.json
+        //   - availableModels:  live Ollama probe (5s timeout) → [] when unreachable
+        //   - ollama.reachable: false on probe failure (does NOT 500)
+        //
+        // POST accepts a JSON body matching RoutingPolicyConfig. Validates
+        // via `validateRoutingConfig`, persists atomically, returns the
+        // normalised value.
+        if (route === '/api/models/routing' && method === 'GET') {
+          try {
+            const dataDir = resolveDataDir();
+            const policy = loadRoutingConfig(dataDir);
+            const ollama = await probeOllamaModels({ timeoutMs: 5000 });
+            sendJson(res, 200, {
+              policy,
+              availableModels: ollama.models,
+              ollama: { reachable: ollama.reachable, host: ollama.host },
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        if (route === '/api/models/routing' && method === 'POST') {
+          const { body, error } = await readJsonCapped(req, 32 * 1024);
+          if (error) { sendJson(res, 400, { error }); return; }
+          const validation = validateRoutingConfig(body);
+          if (!validation.ok || !validation.value) {
+            sendJson(res, 400, { error: 'invalid routing config', details: validation.errors });
+            return;
+          }
+          try {
+            const dataDir = resolveDataDir();
+            saveRoutingConfig(dataDir, validation.value);
+            sendJson(res, 200, { ok: true, policy: validation.value });
           } catch (e) {
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
           }

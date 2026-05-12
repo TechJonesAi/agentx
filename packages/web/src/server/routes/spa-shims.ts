@@ -84,8 +84,9 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   // (`/api/memory/gateway/document/:id` now real — see api.ts.)
   // (`/api/memory/stats` now real — see api.ts)
   // (`/api/memory/upload-document` now real — see api.ts upload handler.)
-  // Model routing config
-  { kind: 'exact', route: '/api/models/routing' },
+  // (`/api/models/routing` GET/POST now real — see api.ts. Strategy 3:
+  //  route reads/writes ~/.agentx/routing.json directly, optional Ollama
+  //  probe for live model discovery. No agent.ts wiring.)
   // (`/api/multimodal/status` now real — see api.ts)
   // (`/api/supervisor/status` now real — see api.ts. Other supervisor
   //  subroutes — restart, services, simulate-crash, logs/:id — still shimmed.)

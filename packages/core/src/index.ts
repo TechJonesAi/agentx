@@ -6,6 +6,21 @@ export { loadConfig, ensureDataDir, resolveDataDir, parseBoolEnv, applyEnvOverri
 
 // LLM Providers
 export { BaseLLMProvider, AnthropicProvider, OpenAIProvider, OllamaProvider, createProvider } from './llm/index.js';
+// Tier 3 Models/Routing Batch — route-level (Strategy 3) helpers for
+// GET/POST /api/models/routing. No agent.ts wiring; the route reads/writes
+// `~/.agentx/routing.json` directly and optionally probes Ollama for live
+// model discovery.
+export {
+  loadRoutingConfig,
+  saveRoutingConfig,
+  validateRoutingConfig,
+  probeOllamaModels,
+  ROUTING_CONFIG_FILENAME,
+} from './llm/routing-config.js';
+export type { RoutingConfigValidation, OllamaProbeResult } from './llm/routing-config.js';
+export type { RoutingPolicyConfig } from './llm/routing-policy.js';
+export { DEFAULT_ROUTING_POLICY_CONFIG } from './llm/routing-policy.js';
+export type { RoutingMode } from './llm/model-registry.js';
 
 // Memory
 export { createDatabase, ConversationMemory, LongTermMemoryStore } from './memory/index.js';
