@@ -8,6 +8,7 @@
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { type Agent, createLogger } from '@agentx/core';
 import { createApiRouter } from './routes/api.js';
 
@@ -17,17 +18,66 @@ export interface WebServerConfig {
   port: number;
   host: string;
   agent: Agent;
+  /**
+   * Optional override for the directory containing the built SPA
+   * (Vite output). When omitted, defaults to `<this-file-dir>/../client`,
+   * which resolves to `dist/client` at runtime.
+   */
   staticDir?: string;
+}
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.map': 'application/json; charset=utf-8',
+};
+
+/**
+ * Resolve the default SPA build directory.
+ *
+ * Exported so tests can verify the resolution logic without booting the server.
+ * At runtime the server file lives at `dist/server/index.js`, so the SPA dir
+ * is `dist/client`.
+ */
+export function resolveDefaultSpaDir(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, '..', 'client');
+}
+
+/**
+ * True when `<spaDir>/index.html` exists — i.e. the SPA has been built.
+ * Exported for tests.
+ */
+export function spaBuildExists(spaDir: string): boolean {
+  try {
+    return fs.statSync(path.join(spaDir, 'index.html')).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export class WebServer {
   private server: http.Server | null = null;
   private config: WebServerConfig;
   private apiRouter: ReturnType<typeof createApiRouter>;
+  private readonly spaDir: string;
 
   constructor(config: WebServerConfig) {
     this.config = config;
     this.apiRouter = createApiRouter(config.agent);
+    this.spaDir = path.resolve(config.staticDir ?? resolveDefaultSpaDir());
   }
 
   async start(): Promise<void> {
@@ -41,6 +91,18 @@ export class WebServer {
       }
     });
 
+    // Start periodic retrieval auto-sync so email + chat ingestions
+    // that write to cognitive_memory.db become retrievable without the
+    // user manually POSTing /api/retrieval/sync. Cheap when no-op
+    // (count-comparison short-circuits). Disable via
+    // AGENTX_RETRIEVAL_AUTOSYNC=false.
+    try {
+      const { startAutoSync } = await import('./routes/retrieval-sync-state.js');
+      startAutoSync(this.config.agent);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'Failed to start retrieval auto-sync (server still up)');
+    }
+
     return new Promise((resolve) => {
       this.server!.listen(this.config.port, this.config.host, () => {
         log.info({ port: this.config.port, host: this.config.host }, 'Web server started');
@@ -50,6 +112,10 @@ export class WebServer {
   }
 
   async stop(): Promise<void> {
+    try {
+      const { stopAutoSync } = await import('./routes/retrieval-sync-state.js');
+      stopAutoSync();
+    } catch { /* */ }
     if (this.server) {
       return new Promise((resolve) => {
         this.server!.close(() => {
@@ -91,33 +157,67 @@ export class WebServer {
     res.end(JSON.stringify({ error: 'Not found' }));
   }
 
+  /**
+   * Serve a static file from disk if it exists inside `spaDir`. Returns true
+   * when the file was served, false when the caller should fall through.
+   * Path traversal is blocked by resolving and checking the prefix.
+   */
+  private tryServeFromSpaDir(url: string, res: http.ServerResponse): boolean {
+    // Strip query string & hash, decode URI safely.
+    let cleaned = url.split('?')[0].split('#')[0];
+    try {
+      cleaned = decodeURIComponent(cleaned);
+    } catch {
+      return false;
+    }
+    if (cleaned === '/' || cleaned === '') cleaned = '/index.html';
+    const filePath = path.resolve(path.join(this.spaDir, cleaned));
+    // Path traversal guard: must remain inside spaDir.
+    if (filePath !== this.spaDir && !filePath.startsWith(this.spaDir + path.sep)) {
+      return false;
+    }
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      return false;
+    }
+    if (!stat.isFile()) return false;
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
+      'Content-Length': stat.size,
+    });
+    fs.createReadStream(filePath).pipe(res);
+    return true;
+  }
+
   private async serveStatic(url: string, res: http.ServerResponse): Promise<void> {
-    // Serve the embedded HTML UI for the root path
+    const spaReady = spaBuildExists(this.spaDir);
+
+    // Root: prefer built SPA index.html when available; otherwise embedded HTML.
     if (url === '/' || url === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      if (spaReady && this.tryServeFromSpaDir('/index.html', res)) return;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(getEmbeddedHtml());
       return;
     }
 
-    // Try static dir if configured
-    if (this.config.staticDir) {
-      const filePath = path.join(this.config.staticDir, url);
-      const safePath = path.resolve(filePath);
-      if (safePath.startsWith(this.config.staticDir) && fs.existsSync(safePath)) {
-        const ext = path.extname(safePath);
-        const mimeTypes: Record<string, string> = {
-          '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
-          '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml',
-        };
-        res.writeHead(200, { 'Content-Type': mimeTypes[ext] ?? 'application/octet-stream' });
-        fs.createReadStream(safePath).pipe(res);
-        return;
-      }
+    // Asset/static path: only attempt disk if the SPA was actually built.
+    // (Avoids a stat-storm when running with the embedded HTML fallback.)
+    if (spaReady && this.tryServeFromSpaDir(url, res)) return;
+
+    // SPA history fallback for non-asset routes (no extension).
+    if (!path.extname(url)) {
+      if (spaReady && this.tryServeFromSpaDir('/index.html', res)) return;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(getEmbeddedHtml());
+      return;
     }
 
-    // SPA fallback: serve index.html for all non-API routes
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(getEmbeddedHtml());
+    // Asset miss with SPA absent (or path-traversal blocked): 404.
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
   }
 }
 

@@ -134,6 +134,10 @@ export async function syncCognitiveToRetrieval(opts: {
   targetDb: DbHandle;
   /** Hard cap on documents (mostly for tests). Default: no cap. */
   limit?: number;
+  /** Restrict the sync to a specific set of document_ids. When supplied,
+   *  only matching documents (and their chunks) are written. Use this for
+   *  post-upload incremental sync. */
+  documentIds?: string[];
 }): Promise<SyncResult> {
   const startedAt = Date.now();
   const Better = await loadBetterSqlite();
@@ -180,6 +184,10 @@ export async function syncCognitiveToRetrieval(opts: {
       source_type: string | null;
       content_hash: string | null;
     };
+    const idFilter = opts.documentIds && opts.documentIds.length > 0;
+    const whereClause = idFilter
+      ? `WHERE document_id IN (${opts.documentIds!.map(() => '?').join(',')})`
+      : '';
     const cogDocs = src
       .prepare(
         `SELECT document_id, file_name, mime_type, origin_type, sender, recipient,
@@ -187,9 +195,10 @@ export async function syncCognitiveToRetrieval(opts: {
                 classification_label, classification_confidence,
                 metadata_json, source_type, content_hash
          FROM documents
+         ${whereClause}
          ORDER BY created_at DESC${limitClause}`,
       )
-      .all() as CognitiveDocRow[];
+      .all(...(idFilter ? opts.documentIds! : [])) as CognitiveDocRow[];
 
     const documentIds: string[] = [];
     let documentsWritten = 0;

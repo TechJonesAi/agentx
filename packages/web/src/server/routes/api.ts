@@ -2579,6 +2579,8 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             } catch { memoryDocs = 0; }
             const memDbInfo = getMemoryDbDiagnostics();
 
+            const { getRetrievalSyncState } = await import('./retrieval-sync-state.js');
+            const syncState = getRetrievalSyncState();
             sendJson(res, 200, {
               enabled: effective,
               source: envParsed === undefined ? 'config' : 'env',
@@ -2588,6 +2590,10 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               retrievalDocumentCount: retrievalDocs,
               memoryDb: memDbInfo.path,
               memoryDocumentCount: memoryDocs,
+              lastSyncAt: syncState.lastSyncAt,
+              lastSyncResult: syncState.lastSyncResult,
+              lastSyncError: syncState.lastSyncError,
+              pendingDocumentCount: syncState.pendingDocumentCount,
               // Honest user-facing summary so the UI can render guidance
               // without recomputing the logic.
               hint:
@@ -2783,6 +2789,18 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
                   error: err instanceof Error ? err.message : String(err),
                 });
               }
+            }
+            // Post-ingest: queue retrieval sync for the new doc IDs.
+            // Fire-and-forget — never blocks the response, never fails
+            // the upload if sync fails.
+            try {
+              const { queueRetrievalSync } = await import('./retrieval-sync-state.js');
+              const newIds = uploaded
+                .map((u) => typeof u['document_id'] === 'string' ? (u['document_id'] as string) : null)
+                .filter((id): id is string => !!id);
+              if (newIds.length > 0) queueRetrievalSync(agent, newIds);
+            } catch (err) {
+              log.warn({ err: String(err) }, 'queueRetrievalSync after upload failed (upload still succeeded)');
             }
             sendJson(res, 200, { ok: true, uploaded });
           } catch (e) {
