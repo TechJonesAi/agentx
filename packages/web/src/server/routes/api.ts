@@ -1871,6 +1871,70 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // GET /api/builder/queue/events — SSE stream of queue state.
+        //
+        // Emits the current queue snapshot immediately on connect, then
+        // re-emits whenever the state changes. State-change detection is
+        // a 1 Hz hash diff of getState(); zero core/BuildQueueManager
+        // changes. Heartbeat every 15s as an SSE comment so the
+        // connection stays warm through proxies.
+        //
+        // Event shape: `event: state\ndata: {running, queued[], completed[]}\n\n`
+        // Heartbeat:   `: heartbeat\n\n` (SSE comment line)
+        //
+        // Background builds submitted via POST /api/builder/run flow
+        // through BuildQueueManager which is the same source this watcher
+        // reads — no race conditions, no double-emission, no fake events.
+        if (route === '/api/builder/queue/events' && method === 'GET') {
+          type Mgr = { getState(): unknown };
+          const queue = (agent as unknown as { getBuildQueue?: () => Mgr }).getBuildQueue?.();
+          if (!queue) { sendJson(res, 503, { error: 'Build queue not available' }); return; }
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+
+          let lastHash = '';
+          let closed = false;
+          const emitIfChanged = (): void => {
+            if (closed) return;
+            try {
+              const state = queue.getState();
+              const json = JSON.stringify(state);
+              if (json !== lastHash) {
+                lastHash = json;
+                res.write(`event: state\ndata: ${json}\n\n`);
+              }
+            } catch (err) {
+              try {
+                res.write(`event: error\ndata: ${JSON.stringify({ message: err instanceof Error ? err.message : String(err) })}\n\n`);
+              } catch { /* socket closed */ }
+            }
+          };
+
+          // Initial state — always emit, even when queue is empty, so
+          // the client knows the connection is live.
+          emitIfChanged();
+
+          const stateTimer = setInterval(emitIfChanged, 1000);
+          const heartbeat = setInterval(() => {
+            if (closed) return;
+            try { res.write(`: heartbeat ${Date.now()}\n\n`); }
+            catch { /* socket closed — cleanup below */ }
+          }, 15_000);
+
+          const cleanup = (): void => {
+            closed = true;
+            clearInterval(stateTimer);
+            clearInterval(heartbeat);
+          };
+          req.on('close', cleanup);
+          req.on('error', cleanup);
+          return;
+        }
+
         if (route === '/api/builder/queue/cancel' && method === 'POST') {
           try {
             type Mgr = { cancelCurrent(): boolean; getState(): unknown };

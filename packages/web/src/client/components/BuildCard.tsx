@@ -113,7 +113,83 @@ export function BuildCardEmpty(): React.JSX.Element {
         fontSize: '12px',
       }}
     >
-      No active build. Builder runtime is not wired on this build.
+      No active build.
+    </div>
+  );
+}
+
+/** Compact queue-state card — for BuildQueueManager output, no workers. */
+export interface QueueBuildState {
+  id: string;
+  appName: string;
+  workspace: string;
+  startedAt?: number;
+  queuedAt?: number;
+  status?: string;
+}
+
+export function QueueBuildCard({
+  build, kind, generatedFileCount, artifactCount,
+}: {
+  build: QueueBuildState;
+  kind: 'running' | 'queued' | 'completed';
+  generatedFileCount?: number;
+  artifactCount?: number;
+}): React.JSX.Element {
+  const color =
+    kind === 'running'   ? 'var(--color-info, #58a6ff)' :
+    kind === 'completed' ? 'var(--color-success, #3fb950)' :
+                            'var(--color-warning, #d29922)';
+  const icon =
+    kind === 'running'   ? '🔄' :
+    kind === 'completed' ? '✅' :
+                            '⏳';
+  const ts = build.startedAt ?? build.queuedAt ?? 0;
+  const duration = ts ? Math.max(0, Date.now() - ts) : 0;
+  const durationLabel = duration > 60_000
+    ? `${Math.round(duration / 60_000)}m ${Math.round((duration % 60_000) / 1000)}s`
+    : `${Math.round(duration / 1000)}s`;
+
+  return (
+    <div
+      className="build-card build-card--queue"
+      style={{
+        background: 'var(--bg-secondary, #161b22)',
+        border: `1px solid ${color}`,
+        borderLeft: `4px solid ${color}`,
+        borderRadius: '10px',
+        padding: '10px 12px',
+        margin: '8px 0',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: '13px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {icon} {build.appName}
+          </div>
+          <div style={{
+            fontSize: '10px', color: 'var(--text-tertiary, #6e7681)', marginTop: '2px',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {build.id}
+          </div>
+        </div>
+        <div style={{ fontSize: '10px', color, fontWeight: 600, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
+          {kind} {ts ? `· ${durationLabel}` : ''}
+        </div>
+      </div>
+      {(generatedFileCount !== undefined || artifactCount !== undefined) && (
+        <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-secondary, #8b949e)' }}>
+          {generatedFileCount !== undefined && <>files: {generatedFileCount} </>}
+          {artifactCount !== undefined && <> · artifacts: {artifactCount}</>}
+        </div>
+      )}
+      <div style={{
+        marginTop: '4px', fontSize: '10px', color: 'var(--text-tertiary, #6e7681)',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      }}>
+        {build.workspace}
+      </div>
     </div>
   );
 }

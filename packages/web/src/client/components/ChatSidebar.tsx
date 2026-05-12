@@ -15,7 +15,13 @@
  * is a single shot on mount; failure → unavailable state.
  */
 import React, { useEffect, useState } from 'react';
-import { BuildCardEmpty } from './BuildCard';
+import { BuildCardEmpty, QueueBuildCard, type QueueBuildState } from './BuildCard';
+
+interface QueueState {
+  running: (QueueBuildState & { startedAt: number }) | null;
+  queued: Array<QueueBuildState & { queuedAt: number }>;
+  completed: Array<QueueBuildState & { status: string; completedAt: number }>;
+}
 
 interface ProjectStats {
   activeProjects: number;
@@ -67,6 +73,7 @@ export function ChatSidebar(): React.JSX.Element {
   const [projectsError, setProjectsError] = useState(false);
   const [provider, setProvider] = useState<ProviderStatus | null>(null);
   const [providerError, setProviderError] = useState(false);
+  const [queueState, setQueueState] = useState<QueueState | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,7 +127,29 @@ export function ChatSidebar(): React.JSX.Element {
       }
     })();
 
-    return () => { cancelled = true; };
+    // ─── Builder queue SSE subscription ────────────────────────────────
+    // Opens an EventSource to /api/builder/queue/events; updates queueState
+    // on each `event: state` payload. Closes on unmount. No polling — the
+    // server emits diffs at 1Hz.
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/builder/queue/events');
+      es.addEventListener('state', (ev: MessageEvent) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(ev.data) as QueueState;
+          setQueueState(data);
+        } catch { /* malformed payload */ }
+      });
+      es.addEventListener('error', () => {
+        // Browser auto-reconnects; nothing to do here. Keep current state.
+      });
+    } catch { /* EventSource unavailable */ }
+
+    return () => {
+      cancelled = true;
+      if (es) { try { es.close(); } catch { /* */ } }
+    };
   }, []);
 
   const badge = (label: string, state: AvailabilityState[keyof AvailabilityState]): React.JSX.Element => {
@@ -264,7 +293,15 @@ export function ChatSidebar(): React.JSX.Element {
       <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: 'var(--text-secondary, #8b949e)', margin: '14px 0 8px' }}>
         Active build
       </h3>
-      <BuildCardEmpty />
+      {queueState?.running ? (
+        <QueueBuildCard build={queueState.running} kind="running" />
+      ) : queueState && queueState.queued.length > 0 ? (
+        <QueueBuildCard build={queueState.queued[0]} kind="queued" />
+      ) : queueState && queueState.completed.length > 0 ? (
+        <QueueBuildCard build={queueState.completed[0]} kind="completed" />
+      ) : (
+        <BuildCardEmpty />
+      )}
     </aside>
   );
 }
