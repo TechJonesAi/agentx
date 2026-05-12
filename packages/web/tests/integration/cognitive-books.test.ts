@@ -17,7 +17,7 @@
  *   - POST /api/cognitive/ingest-book rejects missing book_name + files
  *   - GET /api/cognitive/books/diagnostics surfaces the bound DB path
  */
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -126,11 +126,23 @@ describe('Cognitive Books — end-to-end against real DB', () => {
   let dbDir: string;
   let db: ReturnType<typeof createDatabase>;
   let router: ReturnType<typeof createApiRouter>;
+  let savedDataDir: string | undefined;
 
   beforeAll(() => {
     dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-books-test-'));
+    // Isolate from the user's real ~/.agentx/cognitive_memory.db — the
+    // cognitive-adapter prefers on-disk cognitive_memory.db over the
+    // agent-supplied DB, which would otherwise leak the real 253 docs
+    // into test expectations.
+    savedDataDir = process.env['DATA_DIR'];
+    process.env['DATA_DIR'] = dbDir;
     db = createDatabase(dbDir);
     runCognitiveMemoryMigrations(db);
+  });
+
+  afterAll(() => {
+    if (savedDataDir === undefined) delete process.env['DATA_DIR'];
+    else process.env['DATA_DIR'] = savedDataDir;
   });
 
   beforeEach(() => {

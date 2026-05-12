@@ -37,6 +37,10 @@ export type { VisionProvider } from './multimodal/index.js';
 // Memory
 export { createDatabase, ConversationMemory, LongTermMemoryStore } from './memory/index.js';
 export { runCognitiveMemoryMigrations } from './db/migrations/index.js';
+// Retrieval bridge — one-way sync from cognitive_memory.db → agentx.db
+// so live R1–R12 retrieval finds the restored 253 documents.
+export { syncCognitiveToRetrieval } from './db/sync-cognitive-to-retrieval.js';
+export type { SyncResult } from './db/sync-cognitive-to-retrieval.js';
 // Tier 1 safe-batch re-exports — needed by web routes for /api/agent-loops/*,
 // /api/agents/trace, and /api/logs/llm-interactions/:id. Adding subpath
 // re-exports here is safer than relying on `@agentx/core/dist/...` deep

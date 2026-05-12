@@ -100,20 +100,10 @@ export async function getCognitiveServices(agent: unknown): Promise<CognitiveSer
     if (cached) return cached;
   }
 
-  // 1. Agent-supplied DB (test fakes wire a real schema)
-  const agentDb = (agent as { getDatabase?: () => CognitiveDb }).getDatabase?.();
-  if (agentDb && hasDocumentsTable(agentDb)) {
-    const services: CognitiveServices = { db: agentDb, dbPath: '(agent.getDatabase)' };
-    if (agent && typeof agent === 'object') perAgentCache.set(agent as object, services);
-    lastResolved = services;
-    if (!resolutionLogged) {
-      log.info({}, 'Cognitive adapter bound to agent-supplied DB');
-      resolutionLogged = true;
-    }
-    return services;
-  }
-
-  // 2 + 3. On-disk cognitive_memory.db candidates
+  // 1. On-disk cognitive_memory.db — PREFERRED because the books surface
+  //    needs silly's rich metadata_json (collection / book / quality)
+  //    which the retrieval-sync drops when writing into agentx.db
+  //    (main migration 001 has no metadata_json column).
   const Better = await loadBetterSqlite();
   if (Better) {
     const dataDir = resolveDataDir();
@@ -142,6 +132,21 @@ export async function getCognitiveServices(agent: unknown): Promise<CognitiveSer
         log.warn({ err: (err as Error).message, filePath }, 'Failed to open candidate cognitive DB');
       }
     }
+  }
+
+  // 2. Agent-supplied DB (test fakes wire a real schema with the
+  //    full silly columns — only used in test envs where there's no
+  //    on-disk cognitive_memory.db).
+  const agentDb = (agent as { getDatabase?: () => CognitiveDb }).getDatabase?.();
+  if (agentDb && hasDocumentsTable(agentDb)) {
+    const services: CognitiveServices = { db: agentDb, dbPath: '(agent.getDatabase)' };
+    if (agent && typeof agent === 'object') perAgentCache.set(agent as object, services);
+    lastResolved = services;
+    if (!resolutionLogged) {
+      log.info({}, 'Cognitive adapter bound to agent-supplied DB');
+      resolutionLogged = true;
+    }
+    return services;
   }
 
   // 4. Fallback — agent DB even without documents table. Route handlers

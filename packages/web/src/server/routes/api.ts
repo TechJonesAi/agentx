@@ -31,6 +31,8 @@ import {
   analyzeImageBuffer,
   extractTextFromUpload,
   resolveOllamaModel,
+  syncCognitiveToRetrieval,
+  runCognitiveMemoryMigrations,
   type MCPServerConfig,
 } from '@agentx/core';
 
@@ -2486,6 +2488,62 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         //   config.agent.retrieval.enabled       (config/default.yaml default)
         // Combined into the effective `enabled` boolean — same path Agent
         // construction uses (config.ts applyEnvOverrides).
+        // POST /api/retrieval/sync — bridges cognitive_memory.db → agentx.db.
+        // One-way, idempotent, additive. Reads cognitive_memory.db
+        // READ-ONLY (cannot mutate the 253 user docs). Writes to the agent
+        // DB using INSERT OR REPLACE keyed on document_id. Running multiple
+        // times produces the same end state.
+        //
+        // Body (JSON, optional):
+        //   { "limit": number }   — hard cap for testing
+        //   { "sourcePath": str } — override (defaults to ~/.agentx/cognitive_memory.db)
+        //
+        // Returns: SyncResult with counts + document IDs touched (for
+        // rollback).
+        if (route === '/api/retrieval/sync' && method === 'POST') {
+          const { body, error } = await readJsonCapped(req, 32 * 1024);
+          if (error) { sendJson(res, 400, { error }); return; }
+          const limit = typeof body['limit'] === 'number' ? (body['limit'] as number) : undefined;
+          const sourcePath = typeof body['sourcePath'] === 'string'
+            ? (body['sourcePath'] as string)
+            : path.join(resolveDataDir(), 'cognitive_memory.db');
+          try {
+            type DbLike = { prepare(s: string): { get(): unknown; run(...a: unknown[]): unknown }; exec(s: string): void };
+            const agentDb = (agent as unknown as { getDatabase?: () => DbLike }).getDatabase?.();
+            if (!agentDb) { sendJson(res, 503, { error: 'agent DB not available' }); return; }
+            // Make sure migration 001 has run AND its tables physically
+            // exist. The migrations runner tracks applied state in
+            // `schema_migrations_cognitive`; if the tables were dropped
+            // manually (e.g. by the audit-batch cleanup) but the tracker
+            // still says applied, we need to clear that row so the
+            // migration re-runs. The audit explicitly forbids touching
+            // migration files — this is a tracker reset, not a schema
+            // edit.
+            try {
+              const hasDocsTable = (agentDb as unknown as { prepare(s: string): { get(): unknown } })
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
+                .get();
+              if (!hasDocsTable) {
+                try {
+                  (agentDb as unknown as { prepare(s: string): { run(...a: unknown[]): unknown } })
+                    .prepare("DELETE FROM schema_migrations_cognitive WHERE migration_id = '001_cognitive_memory'")
+                    .run();
+                } catch { /* table may not exist yet */ }
+              }
+              runCognitiveMemoryMigrations(agentDb as never);
+            } catch (err) {
+              log.warn({ err: (err as Error).message }, 'runCognitiveMemoryMigrations failed (continuing)');
+            }
+            const result = await syncCognitiveToRetrieval({
+              sourcePath, targetDb: agentDb as never, limit,
+            });
+            sendJson(res, 200, { ok: true, ...result });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         if (route === '/api/retrieval/diagnostics' && method === 'GET') {
           try {
             const cfg = agent.getConfig();
