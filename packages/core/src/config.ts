@@ -146,6 +146,14 @@ export function parseBoolEnv(raw: string | undefined): boolean | undefined {
  * Invalid values are ignored (config-file value wins).
  */
 export function applyEnvOverrides(config: AgentConfig): AgentConfig {
+  // AGENT_DEFAULT_PROVIDER — env override for agent.defaultProvider so
+  // users can switch to local Ollama without editing config.yaml.
+  // Accepted values: 'anthropic' | 'openai' | 'ollama'. Other values
+  // are ignored (config-file value wins).
+  const providerEnv = process.env['AGENT_DEFAULT_PROVIDER'];
+  if (providerEnv === 'anthropic' || providerEnv === 'openai' || providerEnv === 'ollama') {
+    config.agent.defaultProvider = providerEnv;
+  }
   const retrievalEnv = parseBoolEnv(process.env['AGENT_RETRIEVAL_ENABLED']);
   if (retrievalEnv !== undefined) {
     if (!config.agent.retrieval) config.agent.retrieval = { enabled: false };

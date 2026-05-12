@@ -233,6 +233,65 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // GET /api/agent/provider/status — surfaces the active LLM provider
+        // and whether it can answer chat requests right now. Used by the
+        // Chat sidebar to show "Ollama ready" / "Anthropic key missing"
+        // without polling.
+        if (route === '/api/agent/provider/status' && method === 'GET') {
+          try {
+            const config = agent.getConfig();
+            const providerId = config.agent.defaultProvider;
+            // Prefer per-provider model when the default agent.model belongs
+            // to a different provider family (e.g. defaultProvider=ollama
+            // but agent.model=claude-sonnet-*). Heuristic: if the agent
+            // model name doesn't start with a known prefix for this
+            // provider, fall back to providers[id].model.
+            const providerModel = config.providers?.[providerId]?.model ?? null;
+            const agentModel = config.agent.model ?? null;
+            const matchesProvider =
+              !agentModel ? false :
+              providerId === 'anthropic' ? /^claude/i.test(agentModel) :
+              providerId === 'openai'    ? /^(gpt|o\d)/i.test(agentModel) :
+              providerId === 'ollama'    ? !/^claude|^gpt|^o\d/i.test(agentModel) :
+              false;
+            const model = matchesProvider ? agentModel : (providerModel ?? agentModel);
+            let ready = false;
+            let reason: string | undefined;
+            if (providerId === 'anthropic') {
+              ready = !!process.env['ANTHROPIC_API_KEY'];
+              if (!ready) reason = 'ANTHROPIC_API_KEY not set';
+            } else if (providerId === 'openai') {
+              ready = !!process.env['OPENAI_API_KEY'];
+              if (!ready) reason = 'OPENAI_API_KEY not set';
+            } else if (providerId === 'ollama') {
+              // Probe Ollama liveness — one-shot, 3s timeout.
+              try {
+                const host = process.env['OLLAMA_HOST'] ?? 'http://127.0.0.1:11434';
+                const r = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(3000) });
+                ready = r.ok;
+                if (!ready) reason = `Ollama returned HTTP ${r.status}`;
+              } catch (err) {
+                ready = false;
+                reason = `Ollama unreachable: ${err instanceof Error ? err.message : String(err)}`;
+              }
+            }
+            sendJson(res, 200, {
+              provider: providerId,
+              model,
+              ready,
+              reason,
+              // Hint the user about local fallback when the default isn't ready.
+              hint: ready ? undefined
+                : (providerId !== 'ollama'
+                    ? 'Set AGENT_DEFAULT_PROVIDER=ollama (and start Ollama) to use a local model without an API key.'
+                    : 'Start Ollama (e.g. `ollama serve`) or set OLLAMA_HOST to a reachable instance.'),
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // ─── Chat ────────────────────────────────────────────────────────
         if (route === '/api/chat' && method === 'POST') {
           const body = await parseBody(req);
@@ -1829,13 +1888,18 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               if (isImage) {
                 try {
                   const vr = await analyzeImageBuffer(f.data);
+                  // Augment unavailable reasons with an install hint so the
+                  // UI can show actionable guidance without parsing details.
+                  const friendlyReason = vr.reason
+                    ? `${vr.reason} — Tip: install qwen3-vl with \`ollama pull qwen3-vl:32b\` and start Ollama to enable image understanding.`
+                    : undefined;
                   attachments.push({
                     filename: f.filename, fieldName: f.fieldName,
                     size: f.data.length, mimeType: mime || 'application/octet-stream',
                     kind: 'image',
                     available: vr.available,
                     text: vr.description,
-                    reason: vr.reason,
+                    reason: vr.available ? undefined : (friendlyReason ?? vr.reason),
                   });
                 } catch (e) {
                   attachments.push({
@@ -1887,11 +1951,40 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
                 chat(input: string, sessionId?: string, ctx?: unknown): Promise<string>;
               }).chat(enriched, sessionId, persona ? { persona } : undefined);
             } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e);
-              sendJson(res, 500, {
-                error: 'chat execution failed',
-                detail: msg,
-                attachments,
+              const raw = e instanceof Error ? e.message : String(e);
+              // Categorise common failure modes into a friendly code +
+              // user-facing message. The original detail is preserved for
+              // debugging but the user-facing copy never exposes stack
+              // traces.
+              let code = 'CHAT_EXECUTION_FAILED';
+              let userMessage = 'Chat execution failed.';
+              if (/Could not resolve authentication method|api[- ]?key|authToken|Authorization/i.test(raw)) {
+                code = 'PROVIDER_AUTH_MISSING';
+                userMessage = 'Chat provider not configured. Set ANTHROPIC_API_KEY (or OPENAI_API_KEY), or switch to local Ollama with AGENT_DEFAULT_PROVIDER=ollama.';
+              } else if (/Ollama|ECONNREFUSED|fetch failed/i.test(raw)) {
+                code = 'PROVIDER_UNREACHABLE';
+                userMessage = 'LLM provider unreachable. Start Ollama (`ollama serve`) or check the configured API endpoint.';
+              } else if (/rate.?limit|429/i.test(raw)) {
+                code = 'PROVIDER_RATE_LIMITED';
+                userMessage = 'LLM provider rate-limited the request. Wait a moment and try again.';
+              }
+              // Map attachments to the public shape (no internal `text` field,
+              // just `preview` + `textLength`).
+              const publicAttachments = attachments.map((a) => ({
+                filename: a.filename,
+                kind: a.kind,
+                size: a.size,
+                mimeType: a.mimeType,
+                available: a.available,
+                reason: a.reason,
+                preview: a.text ? a.text.slice(0, 300) + (a.text.length > 300 ? '…' : '') : undefined,
+                textLength: a.text ? a.text.length : 0,
+              }));
+              sendJson(res, 502, {
+                error: userMessage,
+                code,
+                detail: raw,
+                attachments: publicAttachments,
               });
               return;
             }
@@ -1906,7 +1999,10 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
                 mimeType: a.mimeType,
                 available: a.available,
                 reason: a.reason,
-                // Don't echo full text back — just length so UI can show "n chars extracted"
+                // Short text/description preview for UI display (cap 300 chars).
+                // Full text was already inlined into the prompt; this is just a
+                // viewer preview so the user can see what was extracted.
+                preview: a.text ? a.text.slice(0, 300) + (a.text.length > 300 ? '…' : '') : undefined,
                 textLength: a.text ? a.text.length : 0,
               })),
             });

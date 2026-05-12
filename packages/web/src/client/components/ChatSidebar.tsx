@@ -32,6 +32,14 @@ interface AvailabilityState {
   stt: 'unknown' | 'available' | 'unavailable';
 }
 
+interface ProviderStatus {
+  provider: string;
+  model: string | null;
+  ready: boolean;
+  reason?: string;
+  hint?: string;
+}
+
 async function probe(url: string): Promise<boolean> {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
@@ -53,6 +61,8 @@ export function ChatSidebar(): React.JSX.Element {
   });
   const [projects, setProjects] = useState<ProjectStats | null>(null);
   const [projectsError, setProjectsError] = useState(false);
+  const [provider, setProvider] = useState<ProviderStatus | null>(null);
+  const [providerError, setProviderError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,6 +102,17 @@ export function ChatSidebar(): React.JSX.Element {
         if (!cancelled) setProjects(j);
       } catch {
         if (!cancelled) setProjectsError(true);
+      }
+    })();
+
+    void (async () => {
+      try {
+        const r = await fetch('/api/agent/provider/status', { signal: AbortSignal.timeout(3000) });
+        if (!r.ok) throw new Error('not ok');
+        const j = (await r.json()) as ProviderStatus;
+        if (!cancelled) setProvider(j);
+      } catch {
+        if (!cancelled) setProviderError(true);
       }
     })();
 
@@ -156,6 +177,43 @@ export function ChatSidebar(): React.JSX.Element {
           <Stat label="Tasks" value={projects.pendingTasks} />
           <Stat label="Issues" value={projects.openIssues} />
           <Stat label="Health" value={projects.averageHealth} />
+        </div>
+      )}
+
+      <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: 'var(--text-secondary, #8b949e)', margin: '14px 0 8px' }}>
+        LLM provider
+      </h3>
+      {providerError ? (
+        <div style={{
+          padding: '8px 10px', background: 'var(--bg-secondary, #161b22)',
+          border: '1px dashed var(--border, #30363d)', borderRadius: '6px',
+          fontSize: '11px', color: 'var(--text-tertiary, #6e7681)',
+        }}>
+          Provider status unavailable on this build.
+        </div>
+      ) : provider === null ? (
+        <div style={{ fontSize: '12px', color: 'var(--text-tertiary, #6e7681)' }}>Checking…</div>
+      ) : (
+        <div style={{
+          padding: '8px 10px', background: 'var(--bg-secondary, #161b22)',
+          border: `1px solid ${provider.ready ? '#1b3a2d' : '#5a4a1a'}`, borderRadius: '6px',
+          fontSize: '12px',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontWeight: 600 }}>
+              {provider.provider}
+              {provider.model ? <span style={{ color: 'var(--text-tertiary, #6e7681)', fontWeight: 400 }}> · {provider.model}</span> : null}
+            </span>
+            <span style={{ color: provider.ready ? '#3fb950' : '#d29922', fontWeight: 600, whiteSpace: 'nowrap' }}>
+              ● {provider.ready ? 'ready' : 'unavailable'}
+            </span>
+          </div>
+          {!provider.ready && (provider.reason || provider.hint) && (
+            <div style={{ marginTop: '6px', color: 'var(--text-secondary, #8b949e)', lineHeight: 1.4, fontSize: '11px' }}>
+              {provider.reason ? <div>{provider.reason}</div> : null}
+              {provider.hint ? <div style={{ marginTop: '4px', color: '#d29922' }}>{provider.hint}</div> : null}
+            </div>
+          )}
         </div>
       )}
 

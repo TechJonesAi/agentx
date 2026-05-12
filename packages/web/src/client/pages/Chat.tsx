@@ -5,6 +5,7 @@ import { consumeSseChunk } from '../chat-sse-parser';
 import { ChatSidebar } from '../components/ChatSidebar';
 import { SynthesisCard, type SynthesisData } from '../components/SynthesisCard';
 import { renderMessageContent } from '../components/renderMessageContent';
+import { AttachmentCards, type AttachmentSummary } from '../components/AttachmentCards';
 
 /**
  * Chat page — Step 2 (visual merge with Silly Johnson, R1–R12-safe).
@@ -58,6 +59,8 @@ interface AssistantMessage {
    * automatically once a future backend populates it.
    */
   synthesis?: SynthesisData;
+  /** Multimodal attachment results from POST /api/chat/multimodal */
+  attachments?: AttachmentSummary[];
 }
 
 type Message = UserMessage | AssistantMessage;
@@ -145,10 +148,27 @@ export function Chat(): React.JSX.Element {
         for (const f of pendingAttachments) form.append('files', f, f.name);
         const r = await fetch('/api/chat/multimodal', { method: 'POST', body: form });
         const j = await r.json().catch(() => ({}) as Record<string, unknown>);
+        const attsRaw = (j['attachments'] as Array<Record<string, unknown>> | undefined) ?? [];
+        const atts: AttachmentSummary[] = attsRaw.map((a) => ({
+          filename: String(a['filename'] ?? ''),
+          kind: (a['kind'] as 'image' | 'document' | 'unknown') ?? 'unknown',
+          size: Number(a['size'] ?? 0),
+          mimeType: a['mimeType'] as string | undefined,
+          available: a['available'] === true,
+          reason: a['reason'] as string | undefined,
+          preview: a['preview'] as string | undefined,
+          textLength: typeof a['textLength'] === 'number' ? (a['textLength'] as number) : 0,
+        }));
         if (!r.ok) {
+          // Friendly error: server now returns { error, code, detail, attachments }
           const msg = typeof j['error'] === 'string' ? (j['error'] as string) : `HTTP ${r.status}`;
-          setBannerError({ message: msg });
-          updateAssistant(asstId, { streaming: false, error: { message: msg } });
+          const code = typeof j['code'] === 'string' ? (j['code'] as string) : undefined;
+          setBannerError({ code, message: msg });
+          updateAssistant(asstId, {
+            streaming: false,
+            error: { code, message: msg },
+            attachments: atts,
+          });
         } else {
           const response = typeof j['response'] === 'string' ? (j['response'] as string) : '';
           if (typeof j['sessionId'] === 'string') setSessionId(j['sessionId'] as string);
@@ -156,6 +176,7 @@ export function Chat(): React.JSX.Element {
             content: response,
             streaming: false,
             sessionId: typeof j['sessionId'] === 'string' ? (j['sessionId'] as string) : undefined,
+            attachments: atts,
           });
         }
       } catch (err: unknown) {
@@ -448,6 +469,9 @@ function AssistantBubble({
       <div className="msg__role">ASSISTANT</div>
       <div className="msg__bubble">
         {message.retrieval && <RetrievalPanel metadata={message.retrieval} />}
+        {message.attachments && message.attachments.length > 0 && (
+          <AttachmentCards attachments={message.attachments} />
+        )}
         {message.synthesis && (
           <SynthesisCard
             synthesis={message.synthesis}
