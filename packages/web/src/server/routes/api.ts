@@ -2475,6 +2475,78 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // /api/memory/diagnostics — surfaces which SQLite file the memory
         // routes are bound to. Useful for confirming the cognitive-memory.db
         // (silly-johnson) vs agentx.db (legacy) resolution.
+        // GET /api/retrieval/diagnostics — surfaces the effective retrieval
+        // configuration, which DB the retrieval pipeline reads from, and
+        // counts in both retrieval DB (agentx.db) and the memory DB
+        // (cognitive_memory.db). Tells the user the truth about whether
+        // RetrievalPanel will receive non-empty events.
+        //
+        // Reads (in order):
+        //   AGENT_RETRIEVAL_ENABLED env override  (parseBoolEnv truthy/falsy)
+        //   config.agent.retrieval.enabled       (config/default.yaml default)
+        // Combined into the effective `enabled` boolean — same path Agent
+        // construction uses (config.ts applyEnvOverrides).
+        if (route === '/api/retrieval/diagnostics' && method === 'GET') {
+          try {
+            const cfg = agent.getConfig();
+            const configEnabled = cfg.agent?.retrieval?.enabled === true;
+            // Env override semantics match parseBoolEnv in config.ts.
+            const envRaw = process.env['AGENT_RETRIEVAL_ENABLED'];
+            const envParsed = (() => {
+              if (envRaw === undefined) return undefined;
+              const v = String(envRaw).toLowerCase().trim();
+              if (['true', '1', 'yes', 'on'].includes(v)) return true;
+              if (['false', '0', 'no', 'off'].includes(v)) return false;
+              return undefined; // invalid → ignored
+            })();
+            const effective = envParsed === undefined ? configEnabled : envParsed;
+
+            // Retrieval is bound to agent.getDatabase() (= agentx.db).
+            // Memory routes are bound separately via getMemoryDbHandle
+            // (= cognitive_memory.db when present). Surface document
+            // counts on both so the user can see the gap.
+            type DbLike = { prepare(sql: string): { get(): { n?: number } } };
+            const agentDb = (agent as unknown as { getDatabase?: () => DbLike }).getDatabase?.();
+            let retrievalDocs = -1;
+            try {
+              const row = agentDb?.prepare("SELECT COUNT(*) AS n FROM documents").get();
+              retrievalDocs = Number(row?.n ?? 0);
+            } catch { retrievalDocs = 0; }
+
+            const memDb = await getMemoryDbHandle(agent) as unknown as DbLike | null;
+            let memoryDocs = -1;
+            try {
+              const row = memDb?.prepare("SELECT COUNT(*) AS n FROM documents").get();
+              memoryDocs = Number(row?.n ?? 0);
+            } catch { memoryDocs = 0; }
+            const memDbInfo = getMemoryDbDiagnostics();
+
+            sendJson(res, 200, {
+              enabled: effective,
+              source: envParsed === undefined ? 'config' : 'env',
+              configEnabled,
+              envRaw: envRaw ?? null,
+              retrievalDb: '(agent.getDatabase) — agentx.db',
+              retrievalDocumentCount: retrievalDocs,
+              memoryDb: memDbInfo.path,
+              memoryDocumentCount: memoryDocs,
+              // Honest user-facing summary so the UI can render guidance
+              // without recomputing the logic.
+              hint:
+                !effective
+                  ? 'Retrieval disabled by config. Set AGENT_RETRIEVAL_ENABLED=true and restart the agent to enable R7/R11 retrieval events.'
+                  : retrievalDocs === 0 && memoryDocs > 0
+                    ? `Retrieval is enabled but reads from agentx.db (0 documents). Your ${memoryDocs} documents live in ${memDbInfo.path}. Retrieval and the Memory page currently use separate databases; bridging them is a follow-up batch.`
+                    : retrievalDocs > 0
+                      ? `Retrieval is enabled with ${retrievalDocs} documents.`
+                      : 'Retrieval enabled. No documents in any DB yet.',
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         if (route === '/api/memory/diagnostics' && method === 'GET') {
           try {
             // Force resolution if not yet bound, then read diagnostics.

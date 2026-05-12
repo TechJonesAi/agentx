@@ -96,30 +96,47 @@ export async function getMemoryDbHandle(agent: unknown): Promise<DbHandle | null
   }
 
   // Preferred order:
-  //   1. If `agent.getDatabase()` has a `documents` table, use it. This
-  //      preserves test-injected fake agents that wire an in-memory DB —
-  //      they're the source of truth in unit/integration tests and we must
-  //      not silently bypass them by opening the user's real data dir.
-  //   2. Else if `cognitive_memory.db` (silly underscore) exists in dataDir
-  //      and has `documents`, open and return it.
-  //   3. Else if `cognitive-memory.db` (hyphen variant) exists and has
-  //      `documents`, open and return it.
-  //   4. Fall back to `agent.getDatabase()` anyway — route handlers will
-  //      degrade to "no items" when tables are missing.
+  //   1. agent.getDatabase() if it has a `documents` table AND rows.
+  //      TEST path (in-process Database with seeded data) and
+  //      PRODUCTION path (when the agent's DB is actually populated).
+  //   2. agent.getDatabase() if it has the table but is empty AND no
+  //      better on-disk source — fall through to file search.
+  //   3. On-disk cognitive_memory.db (silly underscore) with rows.
+  //      PRODUCTION fallback when agent DB has the table but 0 docs
+  //      (e.g. AGENT_RETRIEVAL_ENABLED=true triggered the cognitive
+  //      migration on agentx.db, creating empty tables).
+  //   4. On-disk cognitive-memory.db (hyphen variant).
+  //   5. agent.getDatabase() fallback — routes degrade to "no items".
+
   const agentDb = (agent as { getDatabase?: () => DbHandle }).getDatabase?.();
-  if (agentDb && hasDocumentsTable(agentDb)) {
-    cachedHandle = agentDb;
+  const agentHasDocs = agentDb && hasDocumentsTable(agentDb);
+  // Step 1: agent DB has the `documents` table → use it. Test agents AND
+  // populated production agents both hit this. We deliberately do NOT
+  // gate on row-count here because tests upload-then-query in a single
+  // suite (table starts empty, populated mid-test). The on-disk
+  // cognitive_memory.db fallback only applies when the agent DB doesn't
+  // even have the table — meaning the agent never ran cognitive
+  // migrations on its primary DB. NOTE: in production, if you've ever
+  // set AGENT_RETRIEVAL_ENABLED=true, agentx.db will gain the table
+  // (empty) and shadow the on-disk cognitive_memory.db. To recover,
+  // either:
+  //   (a) drop the empty `documents` table from agentx.db, OR
+  //   (b) the user-data sync path that bridges the two DBs (follow-up).
+  // The /api/retrieval/diagnostics route surfaces this exact gap.
+  if (agentHasDocs) {
+    cachedHandle = agentDb!;
     cachedPath = '(agent.getDatabase) — has documents table';
     if (agent && typeof agent === 'object') {
-      perAgentCache.set(agent as object, { handle: agentDb, path: cachedPath });
+      perAgentCache.set(agent as object, { handle: agentDb!, path: cachedPath });
     }
     if (!resolutionLogged) {
       log.info({}, 'Memory routes bound to agent-supplied DB');
       resolutionLogged = true;
     }
-    return agentDb;
+    return agentDb!;
   }
 
+  // Step 2 + 3: agent DB is empty (or absent) — look at on-disk candidates
   const dataDir = resolveDataDir();
   const candidates = [
     path.join(dataDir, 'cognitive_memory.db'),
@@ -132,7 +149,6 @@ export async function getMemoryDbHandle(agent: unknown): Promise<DbHandle | null
       if (!fs.existsSync(filePath)) continue;
       try {
         const handle = new Better(filePath, { fileMustExist: true });
-        // Light pragma — non-destructive.
         try { handle.pragma('busy_timeout = 5000'); } catch { /* */ }
         if (hasDocumentsTable(handle)) {
           cachedHandle = handle;
@@ -141,7 +157,7 @@ export async function getMemoryDbHandle(agent: unknown): Promise<DbHandle | null
             perAgentCache.set(agent as object, { handle, path: filePath });
           }
           if (!resolutionLogged) {
-            log.info({ filePath }, 'Memory routes bound to cognitive memory DB');
+            log.info({ filePath }, 'Memory routes bound to on-disk cognitive memory DB');
             resolutionLogged = true;
           }
           return handle;
@@ -154,24 +170,34 @@ export async function getMemoryDbHandle(agent: unknown): Promise<DbHandle | null
     }
   }
 
-  // Fallback: agent's primary DB (typically agentx.db). It probably lacks
-  // the documents table, so the route handlers will gracefully return
-  // "no items" rather than crashing.
-  const fallback = agentDb ?? (agent as { getDatabase?: () => DbHandle }).getDatabase?.();
-  if (fallback) {
-    cachedHandle = fallback;
+  // Step 4 + 5: agent-supplied DB as last resort (empty table or no agent
+  // DB at all). Routes degrade to "no items" when tables are missing.
+  if (agentDb && agentHasDocs) {
+    cachedHandle = agentDb;
+    cachedPath = '(agent.getDatabase) — empty documents table';
+    if (agent && typeof agent === 'object') {
+      perAgentCache.set(agent as object, { handle: agentDb, path: cachedPath });
+    }
+    if (!resolutionLogged) {
+      log.info({}, 'Memory routes bound to agent-supplied DB (empty)');
+      resolutionLogged = true;
+    }
+    return agentDb;
+  }
+  if (agentDb) {
+    cachedHandle = agentDb;
     cachedPath = '(agent.getDatabase) — legacy primary DB';
     if (agent && typeof agent === 'object') {
-      perAgentCache.set(agent as object, { handle: fallback, path: cachedPath });
+      perAgentCache.set(agent as object, { handle: agentDb, path: cachedPath });
     }
     if (!resolutionLogged) {
       log.warn(
         { dataDir, candidates },
-        'No cognitive memory DB found in dataDir; memory routes will use the legacy primary DB (likely lacks documents table)',
+        'No cognitive memory DB found; falling back to agent DB',
       );
       resolutionLogged = true;
     }
-    return fallback;
+    return agentDb;
   }
 
   if (!resolutionLogged) {

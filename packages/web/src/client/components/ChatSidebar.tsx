@@ -50,6 +50,14 @@ interface ProviderStatus {
   installedCount?: number;
 }
 
+interface RetrievalStatus {
+  enabled: boolean;
+  source: 'config' | 'env';
+  retrievalDocumentCount: number;
+  memoryDocumentCount: number;
+  hint?: string;
+}
+
 async function probe(url: string): Promise<boolean> {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
@@ -74,6 +82,7 @@ export function ChatSidebar(): React.JSX.Element {
   const [provider, setProvider] = useState<ProviderStatus | null>(null);
   const [providerError, setProviderError] = useState(false);
   const [queueState, setQueueState] = useState<QueueState | null>(null);
+  const [retrieval, setRetrieval] = useState<RetrievalStatus | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +134,15 @@ export function ChatSidebar(): React.JSX.Element {
       } catch {
         if (!cancelled) setProviderError(true);
       }
+    })();
+
+    void (async () => {
+      try {
+        const r = await fetch('/api/retrieval/diagnostics', { signal: AbortSignal.timeout(3000) });
+        if (!r.ok) throw new Error('not ok');
+        const j = (await r.json()) as RetrievalStatus;
+        if (!cancelled) setRetrieval(j);
+      } catch { /* surface only on success */ }
     })();
 
     // ─── Builder queue SSE subscription ────────────────────────────────
@@ -288,6 +306,39 @@ export function ChatSidebar(): React.JSX.Element {
             </div>
           )}
         </div>
+      )}
+
+      <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: 'var(--text-secondary, #8b949e)', margin: '14px 0 8px' }}>
+        Retrieval (R1–R12)
+      </h3>
+      {retrieval ? (
+        <div style={{
+          padding: '8px 10px', background: 'var(--bg-secondary, #161b22)',
+          border: `1px solid ${retrieval.enabled ? '#1b3a2d' : '#5a4a1a'}`,
+          borderRadius: '6px', fontSize: '12px',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontWeight: 600 }}>
+              {retrieval.enabled ? 'enabled' : 'disabled'}
+              <span style={{ color: 'var(--text-tertiary, #6e7681)', fontWeight: 400 }}>
+                {' '}· source: {retrieval.source}
+              </span>
+            </span>
+            <span style={{ color: retrieval.enabled ? '#3fb950' : '#d29922', fontWeight: 600 }}>
+              ● {retrieval.enabled ? 'active' : 'off'}
+            </span>
+          </div>
+          <div style={{ marginTop: '6px', color: 'var(--text-tertiary, #6e7681)', fontSize: '11px' }}>
+            retrieval DB: {retrieval.retrievalDocumentCount} docs · memory DB: {retrieval.memoryDocumentCount} docs
+          </div>
+          {retrieval.hint && (
+            <div style={{ marginTop: '4px', color: '#d29922', fontSize: '11px', lineHeight: 1.4 }}>
+              {retrieval.hint}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ fontSize: '12px', color: 'var(--text-tertiary, #6e7681)' }}>Checking…</div>
       )}
 
       <h3 style={{ fontSize: '12px', textTransform: 'uppercase', color: 'var(--text-secondary, #8b949e)', margin: '14px 0 8px' }}>
