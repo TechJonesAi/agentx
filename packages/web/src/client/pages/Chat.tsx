@@ -2,25 +2,31 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { RetrievalPanel, type RetrievalMetadata } from '../components/RetrievalPanel';
 import { FeedbackBar } from '../components/FeedbackBar';
 import { consumeSseChunk } from '../chat-sse-parser';
+import { ChatSidebar } from '../components/ChatSidebar';
+import { SynthesisCard, type SynthesisData } from '../components/SynthesisCard';
+import { renderMessageContent } from '../components/renderMessageContent';
 
 /**
- * Chat page — Step 2.
+ * Chat page — Step 2 (visual merge with Silly Johnson, R1–R12-safe).
  *
- * Recreated (not lifted) from Silly Johnson because that file (1500 lines) is
- * tightly coupled to BuilderV2 build cards, multimodal/TTS endpoints,
- * projects polling, and synthesis panels — all out of scope for this step.
- *
- * In scope:
- *  - USER / ASSISTANT styled bubbles (cyan-gradient theme)
- *  - persona selector (cosmetic, sent as `persona` field that the server
- *    safely ignores)
- *  - voice toggle UI (UI only, no backend)
- *  - paperclip/upload button (UI only, no backend)
+ * The chat path itself is unchanged from the R1–R12-safe rewrite:
+ *  - USER / ASSISTANT bubbles
+ *  - persona selector (cosmetic; server tolerates extra field)
  *  - SSE streaming via /api/chat/stream
- *  - R7 retrieval panel (rendered when retrieval event fires)
- *  - R9 snippet highlighting (handled inside RetrievalPanel)
- *  - R11 thumbs feedback (per-assistant-message FeedbackBar)
- *  - safe error banner (categorised codes from R10/live-fix)
+ *  - R7 RetrievalPanel rendered on retrieval event
+ *  - R9 snippet highlighting (RetrievalPanel)
+ *  - R11 FeedbackBar per assistant message
+ *  - R10 categorised error banner
+ *
+ * Additive visual merge from Silly Johnson:
+ *  - Right-side ChatSidebar (multimodal status badges, project workflow
+ *    summary, build-card slot). One-shot fetches on mount, NO polling.
+ *  - SynthesisCard rendering when the optional `synthesis` field is
+ *    populated (dormant — backend doesn't emit synthesis today).
+ *  - renderMessageContent code-block + tool-call rendering inside
+ *    AssistantBubble (pure visual transform).
+ *  - Voice toggle remains UI-only; multimodal availability is reflected in
+ *    the sidebar badges rather than the toggle.
  */
 
 interface UserMessage {
@@ -46,6 +52,12 @@ interface AssistantMessage {
   streaming?: boolean;
   /** terminal error from server (categorised) */
   error?: { code?: string; message: string };
+  /**
+   * Optional silly-style synthesis metadata. The current chat backend does
+   * NOT emit this field, so the SynthesisCard is dormant — it will render
+   * automatically once a future backend populates it.
+   */
+  synthesis?: SynthesisData;
 }
 
 type Message = UserMessage | AssistantMessage;
@@ -217,7 +229,8 @@ export function Chat(): React.JSX.Element {
   };
 
   return (
-    <div className="chat-page">
+    <div className="chat-page" style={{ display: 'flex', flexDirection: 'row', alignItems: 'stretch', height: '100%' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
       {bannerError && (
         <div className="error-banner" role="alert">
           <span className="error-banner__title">
@@ -341,6 +354,8 @@ export function Chat(): React.JSX.Element {
           {sending ? '…' : 'Send'}
         </button>
       </form>
+      </div>
+      <ChatSidebar />
     </div>
   );
 }
@@ -374,8 +389,19 @@ function AssistantBubble({
       <div className="msg__role">ASSISTANT</div>
       <div className="msg__bubble">
         {message.retrieval && <RetrievalPanel metadata={message.retrieval} />}
+        {message.synthesis && (
+          <SynthesisCard
+            synthesis={message.synthesis}
+            rawContent={message.content}
+            renderRaw={renderMessageContent}
+          />
+        )}
         <div className="msg__content">
-          {message.content || (message.streaming ? '…' : '')}
+          {message.content
+            ? renderMessageContent(message.content)
+            : message.streaming
+              ? '…'
+              : ''}
           {message.streaming && <span className="msg__cursor" aria-hidden>▍</span>}
         </div>
         {message.error && (
