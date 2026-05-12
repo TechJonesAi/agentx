@@ -125,12 +125,29 @@ describe('Provider readiness — Anthropic', () => {
 
 describe('Provider readiness — Ollama', () => {
   const savedHost = process.env['OLLAMA_HOST'];
+  const savedDataDir = process.env['DATA_DIR'];
+  const savedOllamaModel = process.env['OLLAMA_MODEL'];
   let fakeOllama: { url: string; close: () => void } | null = null;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    // Isolate from the user's real ~/.agentx/routing.json — resolveOllamaModel
+    // reads it when DATA_DIR is unset, which would otherwise let the live
+    // forceModel leak into test expectations.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-pr-'));
+    process.env['DATA_DIR'] = tmpDir;
+    delete process.env['OLLAMA_MODEL'];
+  });
 
   afterEach(() => {
     if (fakeOllama) { fakeOllama.close(); fakeOllama = null; }
     if (savedHost === undefined) delete process.env['OLLAMA_HOST'];
     else process.env['OLLAMA_HOST'] = savedHost;
+    if (savedDataDir === undefined) delete process.env['DATA_DIR'];
+    else process.env['DATA_DIR'] = savedDataDir;
+    if (savedOllamaModel === undefined) delete process.env['OLLAMA_MODEL'];
+    else process.env['OLLAMA_MODEL'] = savedOllamaModel;
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
   });
 
   it('ready=false when Ollama unreachable', async () => {

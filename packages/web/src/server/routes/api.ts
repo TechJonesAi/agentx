@@ -30,6 +30,7 @@ import {
   probeOllamaModels,
   analyzeImageBuffer,
   extractTextFromUpload,
+  resolveOllamaModel,
   type MCPServerConfig,
 } from '@agentx/core';
 
@@ -241,10 +242,9 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           try {
             const config = agent.getConfig();
             const providerId = config.agent.defaultProvider;
-            // Prefer per-provider model when the default agent.model belongs
-            // to a different provider family. Heuristic: if the agent model
-            // name doesn't start with a known prefix for this provider,
-            // fall back to providers[id].model.
+            // For Ollama, use the same resolver the OllamaProvider does so
+            // status and live provider report the same model. For Anthropic/
+            // OpenAI keep the per-provider heuristic.
             const providerModel = config.providers?.[providerId]?.model ?? null;
             const agentModel = config.agent.model ?? null;
             const matchesProvider =
@@ -253,7 +253,13 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               providerId === 'openai'    ? /^(gpt|o\d)/i.test(agentModel) :
               providerId === 'ollama'    ? !/^claude|^gpt|^o\d/i.test(agentModel) :
               false;
-            const configuredModel = matchesProvider ? agentModel : (providerModel ?? agentModel);
+            let configuredModel = matchesProvider ? agentModel : (providerModel ?? agentModel);
+            let resolutionSource: 'env' | 'routing.json' | 'config' | 'default' | undefined;
+            if (providerId === 'ollama') {
+              const resolved = resolveOllamaModel(configuredModel ?? undefined);
+              configuredModel = resolved.model;
+              resolutionSource = resolved.source;
+            }
 
             interface ProviderStatusResponse {
               provider: string;
@@ -265,11 +271,14 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               availableModels?: Array<{ name: string; size?: number }>;
               recommendedModel?: string | null;
               installedCount?: number;
+              /** Where the configured model name was resolved from. */
+              resolutionSource?: 'env' | 'routing.json' | 'config' | 'default';
             }
             const out: ProviderStatusResponse = {
               provider: providerId,
               model: configuredModel,
               ready: false,
+              ...(resolutionSource ? { resolutionSource } : {}),
             };
 
             if (providerId === 'anthropic') {

@@ -5,7 +5,8 @@ export { Agent } from './agent.js';
 export { loadConfig, ensureDataDir, resolveDataDir, parseBoolEnv, applyEnvOverrides } from './config.js';
 
 // LLM Providers
-export { BaseLLMProvider, AnthropicProvider, OpenAIProvider, OllamaProvider, createProvider } from './llm/index.js';
+export { BaseLLMProvider, AnthropicProvider, OpenAIProvider, OllamaProvider, createProvider, resolveOllamaModel } from './llm/index.js';
+export type { OllamaModelResolution } from './llm/index.js';
 // Tier 3 Models/Routing Batch — route-level (Strategy 3) helpers for
 // GET/POST /api/models/routing. No agent.ts wiring; the route reads/writes
 // `~/.agentx/routing.json` directly and optionally probes Ollama for live
