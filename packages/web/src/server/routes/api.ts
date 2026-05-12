@@ -29,6 +29,7 @@ import {
   validateRoutingConfig,
   probeOllamaModels,
   analyzeImageBuffer,
+  extractTextFromUpload,
   type MCPServerConfig,
 } from '@agentx/core';
 
@@ -1767,6 +1768,148 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             const dataDir = resolveDataDir();
             saveRoutingConfig(dataDir, validation.value);
             sendJson(res, 200, { ok: true, policy: validation.value });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // ─── Chat Multimodal: POST /api/chat/multimodal ─────────────────
+        // Additive design — does NOT replace /api/chat/stream and does NOT
+        // touch agent.ts. The route accepts a multipart upload (message
+        // field + attached files), extracts text/description from each
+        // attachment using existing infrastructure (vision-service for
+        // images, extraction pipeline for documents), composes an enriched
+        // prompt, then delegates to the existing `agent.chat()` method.
+        //
+        // R1–R12 retrieval is unchanged because we go through the same
+        // chat path; the only thing different is the user message contains
+        // attachment-derived text appended to the original text.
+        //
+        // Honest unavailable behaviour:
+        //   - image with no vision provider available → text placeholder
+        //     "[image attached: vision provider unavailable]"
+        //   - document extraction failure → "[file attached: extraction
+        //     failed]"
+        //   - empty `message` AND no files → 400
+        //   - non-multipart body                                  → 400
+        if (route === '/api/chat/multimodal' && method === 'POST') {
+          try {
+            let parsed;
+            try {
+              parsed = await parseMultipartBody(req, { maxBytes: 50 * 1024 * 1024 });
+            } catch (e) {
+              const status = e instanceof MultipartError ? e.status : 400;
+              sendJson(res, status, { error: e instanceof Error ? e.message : String(e) });
+              return;
+            }
+            const message = (parsed.fields['message'] ?? '').trim();
+            const sessionId = parsed.fields['sessionId']?.trim() || undefined;
+            const persona = parsed.fields['persona']?.trim() || undefined;
+            if (!message && parsed.files.length === 0) {
+              sendJson(res, 400, { error: 'message or at least one file is required' });
+              return;
+            }
+            // Process each attachment — images go through vision, others
+            // through the buffer text-extractor.
+            interface AttachmentSummary {
+              filename: string;
+              fieldName: string;
+              size: number;
+              mimeType: string;
+              kind: 'image' | 'document' | 'unknown';
+              available: boolean;
+              text?: string;
+              reason?: string;
+            }
+            const attachments: AttachmentSummary[] = [];
+            for (const f of parsed.files) {
+              const mime = (f.contentType || '').toLowerCase();
+              const isImage = mime.startsWith('image/');
+              if (isImage) {
+                try {
+                  const vr = await analyzeImageBuffer(f.data);
+                  attachments.push({
+                    filename: f.filename, fieldName: f.fieldName,
+                    size: f.data.length, mimeType: mime || 'application/octet-stream',
+                    kind: 'image',
+                    available: vr.available,
+                    text: vr.description,
+                    reason: vr.reason,
+                  });
+                } catch (e) {
+                  attachments.push({
+                    filename: f.filename, fieldName: f.fieldName,
+                    size: f.data.length, mimeType: mime, kind: 'image',
+                    available: false,
+                    reason: e instanceof Error ? e.message : String(e),
+                  });
+                }
+              } else {
+                try {
+                  const er = await extractTextFromUpload(f.data, f.filename);
+                  attachments.push({
+                    filename: f.filename, fieldName: f.fieldName,
+                    size: f.data.length, mimeType: mime || 'application/octet-stream',
+                    kind: er.kind === 'unknown' ? 'unknown' : 'document',
+                    available: !!er.text && er.text.length > 0,
+                    text: er.text,
+                  });
+                } catch (e) {
+                  attachments.push({
+                    filename: f.filename, fieldName: f.fieldName,
+                    size: f.data.length, mimeType: mime, kind: 'document',
+                    available: false,
+                    reason: e instanceof Error ? e.message : String(e),
+                  });
+                }
+              }
+            }
+            // Compose enriched prompt. Cap each attachment-derived text
+            // at 4 000 chars to keep prompt manageable.
+            const parts: string[] = [];
+            if (message) parts.push(message);
+            for (const a of attachments) {
+              const head = `\n\n[Attachment: ${a.filename} (${a.kind}, ${a.size} bytes)]`;
+              if (a.available && a.text) {
+                const trimmed = a.text.length > 4_000 ? a.text.slice(0, 4_000) + ' …[truncated]' : a.text;
+                parts.push(`${head}\n${trimmed}`);
+              } else {
+                parts.push(`${head}\n[${a.kind} content unavailable${a.reason ? ': ' + a.reason : ''}]`);
+              }
+            }
+            const enriched = parts.join('');
+            // Delegate to the existing chat path — preserves R1–R12, retrieval,
+            // feedback, sessions. The chat() method returns a string.
+            let response: string;
+            try {
+              response = await (agent as unknown as {
+                chat(input: string, sessionId?: string, ctx?: unknown): Promise<string>;
+              }).chat(enriched, sessionId, persona ? { persona } : undefined);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              sendJson(res, 500, {
+                error: 'chat execution failed',
+                detail: msg,
+                attachments,
+              });
+              return;
+            }
+            sendJson(res, 200, {
+              response,
+              sessionId: sessionId ?? 'default',
+              multimodal: attachments.length > 0,
+              attachments: attachments.map((a) => ({
+                filename: a.filename,
+                kind: a.kind,
+                size: a.size,
+                mimeType: a.mimeType,
+                available: a.available,
+                reason: a.reason,
+                // Don't echo full text back — just length so UI can show "n chars extracted"
+                textLength: a.text ? a.text.length : 0,
+              })),
+            });
           } catch (e) {
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
           }

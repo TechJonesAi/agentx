@@ -67,8 +67,10 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'exact', route: '/api/builder/run' },
   // (`/api/builder/artifacts` now real — see api.ts. Defensive read; returns
   //  {artifacts: []} when the build_artifacts table is absent.)
-  // Multimodal chat (text-only chat is implemented)
-  { kind: 'exact', route: '/api/chat/multimodal' },
+  // (`/api/chat/multimodal` now real — see api.ts. Additive route that
+  //  uses analyzeImageBuffer + extractTextFromUpload to enrich the user
+  //  prompt with attachment-derived text, then delegates to agent.chat().
+  //  R1–R12 preserved because we go through the existing chat path.)
   // (Cognitive routes implemented:
   //   /api/cognitive/status, /api/cognitive/diagnostics,
   //   /api/cognitive/documents, /api/cognitive/document/:id,

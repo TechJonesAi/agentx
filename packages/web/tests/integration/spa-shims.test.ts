@@ -118,9 +118,9 @@ describe('SPA shims — pure matcher', () => {
     //  `/api/mcp/{allow-remote, servers/:name}` all real in Tier 2 batch B.
     //  Validation apply/patches/rollback still shimmed via /api/validation prefix.)
     expect(tryUnsupportedSpaShim('POST', '/api/validation/apply')?.status).toBe(501);
-    // (/api/vision/analyze now real — Tier 3 vision batch. Swap to
-    //  /api/chat/multimodal which remains shimmed for matcher coverage.)
-    expect(tryUnsupportedSpaShim('POST', '/api/chat/multimodal')?.status).toBe(501);
+    // (/api/vision/analyze + /api/chat/multimodal both now real. Use
+    //  /api/supervisor/restart (permanent shim) for matcher coverage.)
+    expect(tryUnsupportedSpaShim('POST', '/api/supervisor/restart')?.status).toBe(501);
     // /api/builder/runs/:id sub-path still shimmed via /api/builder/runs prefix.
     expect(tryUnsupportedSpaShim('GET', '/api/builder/runs/abc')?.status).toBe(501);
   });
@@ -157,13 +157,13 @@ describe('SPA shims — wired into the api router', () => {
     expect(r.raw.startsWith('<')).toBe(false);
   });
 
-  it('POST /api/chat/multimodal returns 501 + safe JSON envelope', async () => {
-    // /api/vision/analyze is now a real route (Tier 3 vision batch); the
-    // SPA-shim end-to-end contract is asserted instead against
-    // /api/chat/multimodal which remains shimmed (TOUCHES CHAT PATH —
-    // intentionally deferred).
+  it('POST /api/supervisor/restart returns 501 + safe JSON envelope', async () => {
+    // /api/vision/analyze and /api/chat/multimodal are now real routes.
+    // The SPA-shim end-to-end contract is asserted instead against
+    // /api/supervisor/restart, which is documented as a permanent shim
+    // (silly upstream never had a real backend either).
     const router = createApiRouter(fakeAgent() as never);
-    const r = await call(router, 'POST', '/api/chat/multimodal', { image: 'x' });
+    const r = await call(router, 'POST', '/api/supervisor/restart', {});
     expect(r.status).toBe(501);
     expect(r.body['available']).toBe(false);
   });

@@ -105,7 +105,7 @@ export function Chat(): React.JSX.Element {
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if ((!text && attachments.length === 0) || sending) return;
 
     setBannerError(null);
     setSending(true);
@@ -113,7 +113,7 @@ export function Chat(): React.JSX.Element {
     const userMsg: UserMessage = {
       id: newId('u'),
       role: 'user',
-      content: text,
+      content: text || `[${attachments.length} attachment${attachments.length === 1 ? '' : 's'}]`,
       timestamp: Date.now(),
       attachmentCount: attachments.length || undefined,
     };
@@ -127,9 +127,46 @@ export function Chat(): React.JSX.Element {
       streaming: true,
     };
 
+    const pendingAttachments = attachments;
     setMessages((prev) => [...prev, userMsg, asstMsg]);
     setInput('');
     setAttachments([]);
+
+    // Multimodal path — when files are attached, POST to /api/chat/multimodal
+    // (non-streaming). Vision + extraction happen server-side; response is
+    // returned as a single JSON payload. R1–R12 retrieval still runs inside
+    // agent.chat() server-side.
+    if (pendingAttachments.length > 0) {
+      try {
+        const form = new FormData();
+        form.append('message', text);
+        if (sessionId) form.append('sessionId', sessionId);
+        if (persona) form.append('persona', persona);
+        for (const f of pendingAttachments) form.append('files', f, f.name);
+        const r = await fetch('/api/chat/multimodal', { method: 'POST', body: form });
+        const j = await r.json().catch(() => ({}) as Record<string, unknown>);
+        if (!r.ok) {
+          const msg = typeof j['error'] === 'string' ? (j['error'] as string) : `HTTP ${r.status}`;
+          setBannerError({ message: msg });
+          updateAssistant(asstId, { streaming: false, error: { message: msg } });
+        } else {
+          const response = typeof j['response'] === 'string' ? (j['response'] as string) : '';
+          if (typeof j['sessionId'] === 'string') setSessionId(j['sessionId'] as string);
+          updateAssistant(asstId, {
+            content: response,
+            streaming: false,
+            sessionId: typeof j['sessionId'] === 'string' ? (j['sessionId'] as string) : undefined,
+          });
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        setBannerError({ message });
+        updateAssistant(asstId, { streaming: false, error: { message } });
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
 
     // Stream via SSE-over-POST. Note: we use fetch() + getReader() rather than
     // EventSource so we can POST a JSON body. Each event is a single
@@ -312,7 +349,7 @@ export function Chat(): React.JSX.Element {
         <button
           type="button"
           className="composer-icon-btn"
-          title="Attach (UI only)"
+          title="Attach file (images, PDF, DOCX, etc.)"
           onClick={() => fileInputRef.current?.click()}
           disabled={sending}
           aria-label="Attach file"
@@ -320,17 +357,39 @@ export function Chat(): React.JSX.Element {
           📎
         </button>
         {attachments.length > 0 && (
-          <span className="composer-attachments" aria-live="polite">
-            {attachments.length} file{attachments.length === 1 ? '' : 's'}
+          <div className="composer-chips" style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', alignItems: 'center' }}>
+            {attachments.map((f, i) => (
+              <span
+                key={i}
+                className="composer-chip"
+                title={`${f.name} (${(f.size / 1024).toFixed(1)} KB)`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '4px',
+                  background: 'var(--bg-secondary, #161b22)',
+                  border: '1px solid var(--border, #30363d)',
+                  borderRadius: '12px', padding: '2px 8px', fontSize: '11px',
+                  maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}
+              >
+                {f.type.startsWith('image/') ? '🖼' : '📄'} {f.name}
+                <button
+                  type="button"
+                  onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                  aria-label={`Remove ${f.name}`}
+                  style={{ background: 'none', border: 'none', color: 'var(--text-tertiary, #6e7681)', cursor: 'pointer', padding: '0 0 0 4px' }}
+                >×</button>
+              </span>
+            ))}
             <button
               type="button"
               onClick={() => setAttachments([])}
               className="composer-clear"
-              aria-label="Clear attachments"
+              aria-label="Clear all attachments"
+              style={{ background: 'none', border: 'none', color: 'var(--text-tertiary, #6e7681)', cursor: 'pointer', fontSize: '11px' }}
             >
-              ×
+              clear all
             </button>
-          </span>
+          </div>
         )}
         <textarea
           className="composer-input"
@@ -349,7 +408,7 @@ export function Chat(): React.JSX.Element {
         <button
           type="submit"
           className="composer-send"
-          disabled={sending || !input.trim()}
+          disabled={sending || (!input.trim() && attachments.length === 0)}
         >
           {sending ? '…' : 'Send'}
         </button>
@@ -369,7 +428,7 @@ function UserBubble({ message }: { message: UserMessage }): React.JSX.Element {
         {message.attachmentCount ? (
           <div className="msg__attachments">
             📎 {message.attachmentCount} attachment
-            {message.attachmentCount === 1 ? '' : 's'} (UI only — not uploaded)
+            {message.attachmentCount === 1 ? '' : 's'} sent via /api/chat/multimodal
           </div>
         ) : null}
       </div>
