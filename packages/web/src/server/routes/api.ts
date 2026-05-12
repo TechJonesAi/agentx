@@ -16,6 +16,7 @@ import {
   bulkDeleteMemoryItems,
 } from './memory-control-center.js';
 import { getMemoryDbHandle, getMemoryDbDiagnostics } from './memory-db.js';
+import { getCognitiveServices, getCognitiveDiagnostics } from '../cognitive-adapter.js';
 import { parseMultipartBody, MultipartError } from '../multipart.js';
 import {
   ingestUploadedDocument,
@@ -1165,6 +1166,385 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             }
           } catch (e) {
             sendJson(res, 200, { documents: [], error: String(e) });
+          }
+          return;
+        }
+
+        // ─── Cognitive Books subsystem ─────────────────────────────────
+        // GET    /api/cognitive/books                  → list books
+        // GET    /api/cognitive/books/:id              → book + pages
+        // PATCH  /api/cognitive/books/:id/collection   → update collection
+        // POST   /api/cognitive/ingest-book            → multipart OCR upload
+        //
+        // All routes resolve through the cognitive-adapter which binds to
+        // the same SQLite file as memory-db (cognitive_memory.db when
+        // available, agent.getDatabase() in tests). Schema-tolerant where
+        // possible; honest 503/422 when OCR/tables aren't reachable.
+        if (route === '/api/cognitive/books' && method === 'GET') {
+          try {
+            const svc = await getCognitiveServices(agent);
+            if (!svc) { sendJson(res, 503, { error: 'Cognitive DB not available' }); return; }
+            // Probe documents schema once per request — silly cognitive_memory.db
+            // and main agentx.db (after migration 001) have different columns.
+            const cols = new Set<string>();
+            try {
+              const info = svc.db.prepare(`PRAGMA table_info(documents)`).all() as Array<{ name?: string }>;
+              for (const r of info) if (r.name) cols.add(r.name);
+            } catch { /* */ }
+            const hasMeta = cols.has('metadata_json');
+            const hasWordCount = cols.has('word_count');
+            const hasCreated = cols.has('created_at');
+            const hasUpdated = cols.has('updated_at');
+            const hasIngested = cols.has('ingested_at');
+            if (!hasMeta) {
+              // No metadata_json column means no book metadata can be stored.
+              // Books table is effectively unbacked on this schema. Return [].
+              sendJson(res, 200, { books: [] });
+              return;
+            }
+            const dateExpr = hasUpdated && hasCreated ? 'COALESCE(d.updated_at, d.created_at)'
+              : hasUpdated ? 'd.updated_at'
+              : hasCreated ? 'd.created_at'
+              : hasIngested ? 'd.ingested_at'
+              : "''";
+            const createdExpr = hasCreated ? 'd.created_at'
+              : hasIngested ? 'd.ingested_at'
+              : "''";
+            const updatedExpr = hasUpdated ? 'd.updated_at' : createdExpr;
+            const wordCountExpr = hasWordCount ? 'd.word_count' : '0';
+            let rows: Array<Record<string, unknown>> = [];
+            try {
+              rows = svc.db.prepare(
+                `SELECT d.document_id, d.file_name, d.mime_type,
+                        d.metadata_json AS metadata_json,
+                        ${createdExpr} AS created_at,
+                        ${updatedExpr} AS updated_at,
+                        ${wordCountExpr} AS word_count,
+                        (SELECT COUNT(*) FROM document_pages dp WHERE dp.document_id = d.document_id) AS page_count,
+                        (SELECT ROUND(AVG(ocr_confidence), 2) FROM document_pages dp WHERE dp.document_id = d.document_id) AS avg_ocr_confidence
+                 FROM documents d
+                 WHERE d.metadata_json LIKE '%"type":"book"%'
+                 ORDER BY ${dateExpr} DESC`,
+              ).all() as Array<Record<string, unknown>>;
+            } catch {
+              rows = [];
+            }
+            const books = rows.map((b) => {
+              let collection = 'Uncategorised';
+              try {
+                const meta = JSON.parse(String(b['metadata_json'] ?? '{}')) as Record<string, unknown>;
+                if (typeof meta['collection'] === 'string') collection = meta['collection'] as string;
+              } catch { /* */ }
+              return {
+                document_id: b['document_id'],
+                name: b['file_name'],
+                mime_type: b['mime_type'],
+                page_count: Number(b['page_count'] ?? 0),
+                word_count: Number(b['word_count'] ?? 0),
+                avg_ocr_confidence: b['avg_ocr_confidence'],
+                created_at: b['created_at'],
+                updated_at: b['updated_at'],
+                collection,
+              };
+            });
+            sendJson(res, 200, { books });
+          } catch (e) {
+            sendJson(res, 500, { books: [], error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // GET /api/cognitive/books/diagnostics — must come BEFORE :id handler
+        if (route === '/api/cognitive/books/diagnostics' && method === 'GET') {
+          try {
+            await getCognitiveServices(agent);
+            sendJson(res, 200, getCognitiveDiagnostics());
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // GET /api/cognitive/books/:id — book detail with pages
+        if (route.startsWith('/api/cognitive/books/')
+          && method === 'GET'
+          && route !== '/api/cognitive/books/diagnostics'
+          && !route.endsWith('/collection')
+          && !route.includes('/page/')) {
+          try {
+            const docId = decodeURIComponent(route.slice('/api/cognitive/books/'.length));
+            const svc = await getCognitiveServices(agent);
+            if (!svc) { sendJson(res, 503, { error: 'Cognitive DB not available' }); return; }
+            // Probe schema for compatibility
+            const cols = new Set<string>();
+            try {
+              const info = svc.db.prepare(`PRAGMA table_info(documents)`).all() as Array<{ name?: string }>;
+              for (const r of info) if (r.name) cols.add(r.name);
+            } catch { /* */ }
+            const metaExpr = cols.has('metadata_json') ? 'metadata_json' : "'{}' AS metadata_json";
+            const wordCountExpr = cols.has('word_count') ? 'word_count' : '0 AS word_count';
+            const createdExpr = cols.has('created_at') ? 'created_at'
+              : cols.has('ingested_at') ? 'ingested_at AS created_at' : "'' AS created_at";
+            const updatedExpr = cols.has('updated_at') ? 'updated_at' : `${createdExpr.includes(' AS ') ? createdExpr.split(' AS ')[0] : createdExpr} AS updated_at`;
+            let doc: Record<string, unknown> | undefined;
+            try {
+              doc = svc.db.prepare(
+                `SELECT document_id, file_name, mime_type,
+                        ${metaExpr}, ${wordCountExpr}, ${createdExpr}, ${updatedExpr}
+                 FROM documents WHERE document_id = ?`,
+              ).get(docId) as Record<string, unknown> | undefined;
+            } catch { doc = undefined; }
+            if (!doc) { sendJson(res, 404, { error: `book not found: ${docId}` }); return; }
+            let metadata: Record<string, unknown> = {};
+            try {
+              const parsed = JSON.parse(String(doc['metadata_json'] ?? '{}'));
+              if (parsed && typeof parsed === 'object') metadata = parsed as Record<string, unknown>;
+            } catch { /* */ }
+            // document_pages uses `content` in main schema, `page_text` in silly.
+            const pageCols = new Set<string>();
+            try {
+              const info = svc.db.prepare(`PRAGMA table_info(document_pages)`).all() as Array<{ name?: string }>;
+              for (const r of info) if (r.name) pageCols.add(r.name);
+            } catch { /* */ }
+            const textCol = pageCols.has('page_text') ? 'page_text' : pageCols.has('content') ? 'content' : 'content';
+            let pages: Array<Record<string, unknown>> = [];
+            try {
+              pages = svc.db.prepare(
+                `SELECT page_id, page_number, ${textCol} AS page_text, ocr_confidence
+                 FROM document_pages WHERE document_id = ? ORDER BY page_number ASC`,
+              ).all(docId) as Array<Record<string, unknown>>;
+            } catch { pages = []; }
+            sendJson(res, 200, {
+              document_id: doc['document_id'],
+              name: doc['file_name'],
+              mime_type: doc['mime_type'],
+              word_count: Number(doc['word_count'] ?? 0),
+              page_count: pages.length,
+              created_at: doc['created_at'],
+              updated_at: doc['updated_at'],
+              collection: typeof metadata['collection'] === 'string' ? metadata['collection'] : 'Uncategorised',
+              metadata,
+              pages: pages.map((p) => ({
+                page_id: p['page_id'],
+                page_number: Number(p['page_number'] ?? 0),
+                page_text: String(p['page_text'] ?? ''),
+                ocr_confidence: typeof p['ocr_confidence'] === 'number' ? p['ocr_confidence'] : null,
+              })),
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // PATCH /api/cognitive/books/:id/collection — update metadata.collection
+        if (route.startsWith('/api/cognitive/books/')
+          && route.endsWith('/collection')
+          && (method === 'PATCH' || method === 'POST')) {
+          try {
+            const docId = decodeURIComponent(route.slice('/api/cognitive/books/'.length, -('/collection'.length)));
+            const { body, error } = await readJsonCapped(req, 32 * 1024);
+            if (error) { sendJson(res, 400, { error }); return; }
+            const collection = body['collection'];
+            if (typeof collection !== 'string') {
+              sendJson(res, 400, { error: 'collection must be a string' });
+              return;
+            }
+            const svc = await getCognitiveServices(agent);
+            if (!svc) { sendJson(res, 503, { error: 'Cognitive DB not available' }); return; }
+            const existing = svc.db
+              .prepare(`SELECT metadata_json FROM documents WHERE document_id = ?`)
+              .get(docId) as { metadata_json?: string } | undefined;
+            if (!existing) { sendJson(res, 404, { error: `book not found: ${docId}` }); return; }
+            let meta: Record<string, unknown> = {};
+            try {
+              const parsed = JSON.parse(String(existing.metadata_json ?? '{}'));
+              if (parsed && typeof parsed === 'object') meta = parsed as Record<string, unknown>;
+            } catch { /* */ }
+            if (collection.trim().length === 0) delete meta['collection'];
+            else meta['collection'] = collection.trim();
+            svc.db.prepare(`UPDATE documents SET metadata_json = ? WHERE document_id = ?`)
+              .run(JSON.stringify(meta), docId);
+            sendJson(res, 200, { ok: true, document_id: docId, collection: meta['collection'] ?? null });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // POST /api/cognitive/ingest-book — multipart image upload → OCR per page
+        if (route === '/api/cognitive/ingest-book' && method === 'POST') {
+          try {
+            let parsed;
+            try {
+              parsed = await parseMultipartBody(req, { maxBytes: 250 * 1024 * 1024 });
+            } catch (e) {
+              const status = e instanceof MultipartError ? e.status : 400;
+              sendJson(res, status, { error: e instanceof Error ? e.message : String(e) });
+              return;
+            }
+            const bookName = (parsed.fields['book_name'] ?? '').trim();
+            const existingDocId = (parsed.fields['document_id'] ?? '').trim();
+            const collection = (parsed.fields['collection'] ?? '').trim();
+            if (!bookName && !existingDocId) {
+              sendJson(res, 400, { error: 'book_name or document_id field is required' });
+              return;
+            }
+            if (parsed.files.length === 0) {
+              sendJson(res, 400, { error: 'no image files in multipart body' });
+              return;
+            }
+            // Load tesseract.js — honest 422 when not present.
+            type CreateWorker = (lang: string) => Promise<{
+              recognize(buf: Buffer): Promise<{ data: { text?: string; confidence?: number } }>;
+              terminate(): Promise<void>;
+            }>;
+            let createWorker: CreateWorker | null = null;
+            try {
+              const Tesseract = (await import('tesseract.js' as string)) as {
+                createWorker?: CreateWorker;
+                default?: { createWorker?: CreateWorker };
+              };
+              createWorker = Tesseract.createWorker ?? Tesseract.default?.createWorker ?? null;
+            } catch {
+              createWorker = null;
+            }
+            if (!createWorker) {
+              sendJson(res, 422, {
+                error: 'OCR engine unavailable',
+                reason: 'tesseract.js could not be loaded. Install it to enable book ingestion.',
+              });
+              return;
+            }
+            const svc = await getCognitiveServices(agent);
+            if (!svc) { sendJson(res, 503, { error: 'Cognitive DB not available' }); return; }
+            // Sort files by filename so page order is preserved.
+            const files = parsed.files.slice().sort((a, b) =>
+              a.filename.localeCompare(b.filename, undefined, { numeric: true }),
+            );
+            const totalSize = files.reduce((s, f) => s + f.data.length, 0);
+            let documentId = existingDocId;
+            let startPage = 1;
+            const isAppend = !!existingDocId;
+            if (isAppend) {
+              const existing = svc.db
+                .prepare(`SELECT document_id FROM documents WHERE document_id = ?`)
+                .get(documentId) as { document_id?: string } | undefined;
+              if (!existing) { sendJson(res, 404, { error: `book not found: ${documentId}` }); return; }
+              const maxPage = svc.db
+                .prepare(`SELECT MAX(page_number) AS max_page FROM document_pages WHERE document_id = ?`)
+                .get(documentId) as { max_page?: number } | undefined;
+              startPage = (maxPage?.max_page ?? 0) + 1;
+            } else {
+              const crypto = await import('node:crypto');
+              documentId = `doc_${crypto.randomBytes(8).toString('hex')}`;
+              const meta: Record<string, unknown> = { type: 'book' };
+              if (collection) meta['collection'] = collection;
+              const nowIso = new Date().toISOString();
+              // Schema-tolerant INSERT: probe documents columns and only set
+              // those that exist. Required columns differ between main (NOT NULL
+              // file_type, content_type, ingested_at, updated_at) and silly
+              // (file_path, file_size_bytes, document_date).
+              try {
+                const docCols = new Set<string>();
+                const info = svc.db.prepare(`PRAGMA table_info(documents)`).all() as Array<{ name?: string }>;
+                for (const r of info) if (r.name) docCols.add(r.name);
+                const fields: Record<string, unknown> = {
+                  document_id: documentId,
+                  file_name: bookName,
+                  mime_type: 'image/book-collection',
+                  classification_label: 'knowledge_base',
+                  origin_type: 'file',
+                };
+                if (docCols.has('file_type')) fields['file_type'] = 'book';
+                if (docCols.has('file_path')) fields['file_path'] = `book://${bookName}`;
+                if (docCols.has('content_type')) fields['content_type'] = 'document';
+                if (docCols.has('file_size_bytes')) fields['file_size_bytes'] = totalSize;
+                if (docCols.has('classification_confidence')) fields['classification_confidence'] = 1.0;
+                if (docCols.has('document_date')) fields['document_date'] = nowIso;
+                if (docCols.has('extraction_status')) fields['extraction_status'] = 'pending';
+                if (docCols.has('indexing_status')) fields['indexing_status'] = 'pending';
+                if (docCols.has('word_count')) fields['word_count'] = 0;
+                if (docCols.has('metadata_json')) fields['metadata_json'] = JSON.stringify(meta);
+                if (docCols.has('created_at')) fields['created_at'] = nowIso;
+                if (docCols.has('updated_at')) fields['updated_at'] = nowIso;
+                if (docCols.has('ingested_at')) fields['ingested_at'] = Date.now();
+                const keys = Object.keys(fields);
+                const placeholders = keys.map(() => '?').join(',');
+                const sql = `INSERT OR IGNORE INTO documents (${keys.join(',')}) VALUES (${placeholders})`;
+                svc.db.prepare(sql).run(...keys.map((k) => fields[k]));
+              } catch (sqlErr) {
+                sendJson(res, 500, { error: 'failed to insert document row', detail: String(sqlErr) });
+                return;
+              }
+            }
+            // OCR each page
+            const crypto = await import('node:crypto');
+            const worker = await createWorker('eng');
+            const pageResults: Array<{
+              page: number; filename: string; words: number; confidence: number;
+            }> = [];
+            let newWordCount = 0;
+            try {
+              for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const pageNum = startPage + i;
+                try {
+                  const { data } = await worker.recognize(file.data);
+                  const pageText = (data.text ?? '').trim();
+                  const confidence = (data.confidence ?? 0) / 100;
+                  const words = pageText.split(/\s+/).filter((w) => w.length > 0).length;
+                  newWordCount += words;
+                  // Schema-tolerant page insert (silly: page_text, main: content)
+                  const pgCols = new Set<string>();
+                  try {
+                    const info = svc.db.prepare(`PRAGMA table_info(document_pages)`).all() as Array<{ name?: string }>;
+                    for (const r of info) if (r.name) pgCols.add(r.name);
+                  } catch { /* */ }
+                  const pageTextCol = pgCols.has('page_text') ? 'page_text' : 'content';
+                  svc.db.prepare(
+                    `INSERT OR REPLACE INTO document_pages (
+                      page_id, document_id, page_number, ${pageTextCol}, ocr_confidence, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)`,
+                  ).run(
+                    `page_${crypto.randomBytes(6).toString('hex')}`,
+                    documentId, pageNum, pageText, confidence, new Date().toISOString(),
+                  );
+                  pageResults.push({ page: pageNum, filename: file.filename, words, confidence: Math.round(confidence * 100) });
+                } catch (pageErr) {
+                  pageResults.push({ page: pageNum, filename: file.filename, words: 0, confidence: 0 });
+                  (await import('@agentx/core')).createLogger('web:ingest-book').warn(
+                    { err: (pageErr as Error).message, page: pageNum }, 'OCR page failed',
+                  );
+                }
+              }
+            } finally {
+              try { await worker.terminate(); } catch { /* */ }
+            }
+            // Update document word_count if the column exists (silly schema only)
+            try {
+              const docCols = new Set<string>();
+              const info = svc.db.prepare(`PRAGMA table_info(documents)`).all() as Array<{ name?: string }>;
+              for (const r of info) if (r.name) docCols.add(r.name);
+              if (docCols.has('word_count')) {
+                svc.db.prepare(`UPDATE documents SET word_count = ?, updated_at = ? WHERE document_id = ?`)
+                  .run(newWordCount, new Date().toISOString(), documentId);
+              } else if (docCols.has('updated_at')) {
+                svc.db.prepare(`UPDATE documents SET updated_at = ? WHERE document_id = ?`)
+                  .run(new Date().toISOString(), documentId);
+              }
+            } catch { /* */ }
+            sendJson(res, 200, {
+              ok: true,
+              document_id: documentId,
+              book_name: bookName,
+              is_append: isAppend,
+              pages_ingested: pageResults.length,
+              pages: pageResults,
+              total_word_count: newWordCount,
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
           }
           return;
         }

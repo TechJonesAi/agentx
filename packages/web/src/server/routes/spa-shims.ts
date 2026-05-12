@@ -75,8 +75,13 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   //   /api/cognitive/ingest, /api/cognitive/search
   //  Books and ingest-book/run still shimmed — book-format support
   //  needs a separate library lift.)
-  { kind: 'prefix', prefix: '/api/cognitive/books' },
-  { kind: 'exact', route: '/api/cognitive/ingest-book' },
+  // (`/api/cognitive/books`, `/api/cognitive/books/:id`,
+  //  `/api/cognitive/books/:id/collection`, and `/api/cognitive/ingest-book`
+  //  now real — see api.ts. Cognitive Books minimal adapter pattern: routes
+  //  use raw SQL against the same cognitive_memory.db that memory-db.ts
+  //  resolves to. No RankingService/ContradictionDetector/ContextBuilder
+  //  lifts (would break R1–R12). Books/page sub-paths (e.g. /page/:n/image,
+  //  /page/:n/replace) remain unimplemented — fall through to the 404.)
   { kind: 'exact', route: '/api/cognitive/run' },
   // Integrity / self-repair
   { kind: 'prefix', prefix: '/api/integrity' },
