@@ -691,8 +691,11 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // Logs page → LLM interaction history + system log buffer
         if (route === '/api/logs/llm-interactions' && method === 'GET') {
           try {
-            const logger = (agent as unknown as { getLLMInteractionLogger?: () => { recent(n?: number): unknown } }).getLLMInteractionLogger?.();
-            const entries = logger?.recent(200) ?? [];
+            // LLMInteractionLogger.tail(limit) — not .recent(). Earlier
+            // route handler called a non-existent method; live audit
+            // caught it returning {entries:[], error:"…not a function"}.
+            const logger = (agent as unknown as { getLLMInteractionLogger?: () => { tail(n?: number): unknown[] } }).getLLMInteractionLogger?.();
+            const entries = logger?.tail(200) ?? [];
             sendJson(res, 200, { entries });
           } catch (e) {
             sendJson(res, 200, { entries: [], error: String(e) });
@@ -1982,8 +1985,14 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
           try {
             const dataDir = resolveDataDir();
-            saveRoutingConfig(dataDir, validation.value);
-            sendJson(res, 200, { ok: true, policy: validation.value });
+            // Merge into the existing routing.json so we don't drop fields
+            // that other routes set (e.g. forceModel via select-local-model).
+            // Live audit caught POST /api/models/routing {mode} wiping a
+            // previously-persisted forceModel.
+            const current = loadRoutingConfig(dataDir);
+            const merged = { ...current, ...validation.value };
+            saveRoutingConfig(dataDir, merged);
+            sendJson(res, 200, { ok: true, policy: merged });
           } catch (e) {
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
           }
