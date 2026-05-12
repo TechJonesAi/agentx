@@ -14,6 +14,20 @@ export type ChatStreamEvent =
   | { type: 'tool'; tool: string; args: Record<string, unknown> }
   | { type: 'done'; content: string; sessionId?: string }
   | { type: 'error'; code?: string; message: string }
+  /** Multimodal-only: emitted once per attachment before chat_started. */
+  | {
+      type: 'attachment_processed';
+      filename: string;
+      kind: 'image' | 'document' | 'unknown';
+      size: number;
+      available: boolean;
+      mimeType?: string;
+      reason?: string;
+      preview?: string;
+      textLength?: number;
+    }
+  /** Multimodal-only: emitted after all attachments, before the first token. */
+  | { type: 'chat_started'; sessionId: string; multimodal: boolean; persona?: string }
   | { type: 'unknown'; raw: Record<string, unknown> };
 
 /**
@@ -71,6 +85,25 @@ function toEvent(raw: Record<string, unknown>): ChatStreamEvent {
         code:
           typeof raw['code'] === 'string' ? (raw['code'] as string) : undefined,
         message: String(raw['message'] ?? 'Unknown error'),
+      };
+    case 'attachment_processed':
+      return {
+        type: 'attachment_processed',
+        filename: String(raw['filename'] ?? ''),
+        kind: (raw['kind'] as 'image' | 'document' | 'unknown') ?? 'unknown',
+        size: typeof raw['size'] === 'number' ? (raw['size'] as number) : 0,
+        available: raw['available'] === true,
+        mimeType: typeof raw['mimeType'] === 'string' ? (raw['mimeType'] as string) : undefined,
+        reason: typeof raw['reason'] === 'string' ? (raw['reason'] as string) : undefined,
+        preview: typeof raw['preview'] === 'string' ? (raw['preview'] as string) : undefined,
+        textLength: typeof raw['textLength'] === 'number' ? (raw['textLength'] as number) : 0,
+      };
+    case 'chat_started':
+      return {
+        type: 'chat_started',
+        sessionId: typeof raw['sessionId'] === 'string' ? (raw['sessionId'] as string) : 'default',
+        multimodal: raw['multimodal'] === true,
+        persona: typeof raw['persona'] === 'string' ? (raw['persona'] as string) : undefined,
       };
     default:
       return { type: 'unknown', raw };

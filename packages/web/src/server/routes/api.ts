@@ -2092,6 +2092,10 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         //   - empty `message` AND no files → 400
         //   - non-multipart body                                  → 400
         if (route === '/api/chat/multimodal' && method === 'POST') {
+          // Streaming opt-in via ?stream=true. Default (no query) preserves
+          // the non-streaming JSON response shape exactly — every existing
+          // test + UI fallback still passes.
+          const streamMode = /[?&]stream=(true|1|yes|on)\b/i.test(url);
           try {
             let parsed;
             try {
@@ -2182,8 +2186,114 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               }
             }
             const enriched = parts.join('');
-            // Delegate to the existing chat path — preserves R1–R12, retrieval,
-            // feedback, sessions. The chat() method returns a string.
+            // Public-shape attachment summary (no internal `text`, just
+            // `preview` + `textLength`). Shared by streaming and non-
+            // streaming branches.
+            const publicAttachments = attachments.map((a) => ({
+              filename: a.filename,
+              kind: a.kind,
+              size: a.size,
+              mimeType: a.mimeType,
+              available: a.available,
+              reason: a.reason,
+              preview: a.text ? a.text.slice(0, 300) + (a.text.length > 300 ? '…' : '') : undefined,
+              textLength: a.text ? a.text.length : 0,
+            }));
+            // Friendly error categorisation — used by both branches.
+            const categoriseError = (raw: string): { code: string; userMessage: string } => {
+              if (/Could not resolve authentication method|api[- ]?key|authToken|Authorization/i.test(raw)) {
+                return {
+                  code: 'PROVIDER_AUTH_MISSING',
+                  userMessage: 'Chat provider not configured. Set ANTHROPIC_API_KEY (or OPENAI_API_KEY), or switch to local Ollama with AGENT_DEFAULT_PROVIDER=ollama.',
+                };
+              }
+              if (/Ollama|ECONNREFUSED|fetch failed/i.test(raw)) {
+                return {
+                  code: 'PROVIDER_UNREACHABLE',
+                  userMessage: 'LLM provider unreachable. Start Ollama (`ollama serve`) or check the configured API endpoint.',
+                };
+              }
+              if (/rate.?limit|429/i.test(raw)) {
+                return {
+                  code: 'PROVIDER_RATE_LIMITED',
+                  userMessage: 'LLM provider rate-limited the request. Wait a moment and try again.',
+                };
+              }
+              return { code: 'CHAT_EXECUTION_FAILED', userMessage: 'Chat execution failed.' };
+            };
+
+            // ─── Streaming branch ─────────────────────────────────────────
+            // Opt-in via ?stream=true. Reuses agent.chatStream() so the same
+            // R1–R12 retrieval callback the regular /api/chat/stream path
+            // exposes fires here too.
+            //
+            // Event protocol — matches /api/chat/stream's data:{type,...}
+            // shape so the existing chat-sse-parser handles both endpoints:
+            //
+            //   data: {"type":"attachment_processed", "filename":..., "kind":..., "available":..., ...}
+            //   data: {"type":"chat_started", "sessionId":..., "multimodal":true, "persona"?:...}
+            //   data: {"type":"retrieval", "retrieval":{...}}        (when onRetrieval fires)
+            //   data: {"type":"token", "content":"..."}
+            //   data: {"type":"done", "content":"...", "sessionId":"..."}
+            //   data: {"type":"error", "code":"...", "message":"..."}
+            if (streamMode) {
+              res.writeHead(200, {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+              });
+              const write = (payload: Record<string, unknown>): void => {
+                try { res.write(`data: ${JSON.stringify(payload)}\n\n`); }
+                catch { /* socket closed */ }
+              };
+              for (const a of publicAttachments) write({ type: 'attachment_processed', ...a });
+              write({
+                type: 'chat_started',
+                sessionId: sessionId ?? 'default',
+                multimodal: attachments.length > 0,
+                ...(persona ? { persona } : {}),
+              });
+              try {
+                let accumulated = '';
+                const finalContent = await (agent as unknown as {
+                  chatStream(
+                    input: string,
+                    callbacks: {
+                      onRetrieval?: (m: unknown) => void;
+                      onToken?: (t: string) => void;
+                      onError?: (err: Error) => void;
+                      onComplete?: (resp: { content: string }) => void;
+                    },
+                    sessionId?: string,
+                  ): Promise<string>;
+                }).chatStream(enriched, {
+                  onRetrieval: (metadata) => write({ type: 'retrieval', retrieval: metadata }),
+                  onToken: (token) => {
+                    accumulated += token;
+                    write({ type: 'token', content: token });
+                  },
+                  onError: (err) => {
+                    const { code, userMessage } = categoriseError(err.message);
+                    write({ type: 'error', code, message: userMessage, detail: err.message });
+                  },
+                }, sessionId);
+                write({
+                  type: 'done',
+                  content: typeof finalContent === 'string' && finalContent.length > 0 ? finalContent : accumulated,
+                  sessionId: sessionId ?? 'default',
+                });
+              } catch (e) {
+                const raw = e instanceof Error ? e.message : String(e);
+                const { code, userMessage } = categoriseError(raw);
+                write({ type: 'error', code, message: userMessage, detail: raw });
+              } finally {
+                try { res.end(); } catch { /* */ }
+              }
+              return;
+            }
+
+            // ─── Non-streaming branch (default — unchanged contract) ─────
             let response: string;
             try {
               response = await (agent as unknown as {
@@ -2191,34 +2301,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               }).chat(enriched, sessionId, persona ? { persona } : undefined);
             } catch (e) {
               const raw = e instanceof Error ? e.message : String(e);
-              // Categorise common failure modes into a friendly code +
-              // user-facing message. The original detail is preserved for
-              // debugging but the user-facing copy never exposes stack
-              // traces.
-              let code = 'CHAT_EXECUTION_FAILED';
-              let userMessage = 'Chat execution failed.';
-              if (/Could not resolve authentication method|api[- ]?key|authToken|Authorization/i.test(raw)) {
-                code = 'PROVIDER_AUTH_MISSING';
-                userMessage = 'Chat provider not configured. Set ANTHROPIC_API_KEY (or OPENAI_API_KEY), or switch to local Ollama with AGENT_DEFAULT_PROVIDER=ollama.';
-              } else if (/Ollama|ECONNREFUSED|fetch failed/i.test(raw)) {
-                code = 'PROVIDER_UNREACHABLE';
-                userMessage = 'LLM provider unreachable. Start Ollama (`ollama serve`) or check the configured API endpoint.';
-              } else if (/rate.?limit|429/i.test(raw)) {
-                code = 'PROVIDER_RATE_LIMITED';
-                userMessage = 'LLM provider rate-limited the request. Wait a moment and try again.';
-              }
-              // Map attachments to the public shape (no internal `text` field,
-              // just `preview` + `textLength`).
-              const publicAttachments = attachments.map((a) => ({
-                filename: a.filename,
-                kind: a.kind,
-                size: a.size,
-                mimeType: a.mimeType,
-                available: a.available,
-                reason: a.reason,
-                preview: a.text ? a.text.slice(0, 300) + (a.text.length > 300 ? '…' : '') : undefined,
-                textLength: a.text ? a.text.length : 0,
-              }));
+              const { code, userMessage } = categoriseError(raw);
               sendJson(res, 502, {
                 error: userMessage,
                 code,
@@ -2231,19 +2314,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               response,
               sessionId: sessionId ?? 'default',
               multimodal: attachments.length > 0,
-              attachments: attachments.map((a) => ({
-                filename: a.filename,
-                kind: a.kind,
-                size: a.size,
-                mimeType: a.mimeType,
-                available: a.available,
-                reason: a.reason,
-                // Short text/description preview for UI display (cap 300 chars).
-                // Full text was already inlined into the prompt; this is just a
-                // viewer preview so the user can see what was extracted.
-                preview: a.text ? a.text.slice(0, 300) + (a.text.length > 300 ? '…' : '') : undefined,
-                textLength: a.text ? a.text.length : 0,
-              })),
+              attachments: publicAttachments,
             });
           } catch (e) {
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });

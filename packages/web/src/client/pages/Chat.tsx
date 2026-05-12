@@ -146,39 +146,94 @@ export function Chat(): React.JSX.Element {
         if (sessionId) form.append('sessionId', sessionId);
         if (persona) form.append('persona', persona);
         for (const f of pendingAttachments) form.append('files', f, f.name);
-        const r = await fetch('/api/chat/multimodal', { method: 'POST', body: form });
-        const j = await r.json().catch(() => ({}) as Record<string, unknown>);
-        const attsRaw = (j['attachments'] as Array<Record<string, unknown>> | undefined) ?? [];
-        const atts: AttachmentSummary[] = attsRaw.map((a) => ({
-          filename: String(a['filename'] ?? ''),
-          kind: (a['kind'] as 'image' | 'document' | 'unknown') ?? 'unknown',
-          size: Number(a['size'] ?? 0),
-          mimeType: a['mimeType'] as string | undefined,
-          available: a['available'] === true,
-          reason: a['reason'] as string | undefined,
-          preview: a['preview'] as string | undefined,
-          textLength: typeof a['textLength'] === 'number' ? (a['textLength'] as number) : 0,
-        }));
-        if (!r.ok) {
-          // Friendly error: server now returns { error, code, detail, attachments }
-          const msg = typeof j['error'] === 'string' ? (j['error'] as string) : `HTTP ${r.status}`;
-          const code = typeof j['code'] === 'string' ? (j['code'] as string) : undefined;
-          setBannerError({ code, message: msg });
-          updateAssistant(asstId, {
-            streaming: false,
-            error: { code, message: msg },
-            attachments: atts,
-          });
-        } else {
-          const response = typeof j['response'] === 'string' ? (j['response'] as string) : '';
-          if (typeof j['sessionId'] === 'string') setSessionId(j['sessionId'] as string);
-          updateAssistant(asstId, {
-            content: response,
-            streaming: false,
-            sessionId: typeof j['sessionId'] === 'string' ? (j['sessionId'] as string) : undefined,
-            attachments: atts,
-          });
+        // Prefer streaming so RetrievalPanel + per-attachment cards arrive
+        // progressively. Server reuses agent.chatStream() so R1–R12
+        // retrieval events fire here too.
+        const res = await fetch('/api/chat/multimodal?stream=true', {
+          method: 'POST',
+          body: form,
+          headers: { Accept: 'text/event-stream' },
+        });
+        if (!res.ok || !res.body) {
+          // Fallback: non-streaming JSON response (server may have returned
+          // a 400/502 before opening the stream).
+          let code: string | undefined;
+          let message = `HTTP ${res.status}`;
+          let atts: AttachmentSummary[] = [];
+          try {
+            const j = (await res.json()) as Record<string, unknown>;
+            if (typeof j['error'] === 'string') message = j['error'] as string;
+            if (typeof j['code'] === 'string') code = j['code'] as string;
+            const attsRaw = (j['attachments'] as Array<Record<string, unknown>> | undefined) ?? [];
+            atts = attsRaw.map((a) => ({
+              filename: String(a['filename'] ?? ''),
+              kind: (a['kind'] as 'image' | 'document' | 'unknown') ?? 'unknown',
+              size: Number(a['size'] ?? 0),
+              mimeType: a['mimeType'] as string | undefined,
+              available: a['available'] === true,
+              reason: a['reason'] as string | undefined,
+              preview: a['preview'] as string | undefined,
+              textLength: typeof a['textLength'] === 'number' ? (a['textLength'] as number) : 0,
+            }));
+          } catch { /* malformed response */ }
+          setBannerError({ code, message });
+          updateAssistant(asstId, { streaming: false, error: { code, message }, attachments: atts });
+          setSending(false);
+          return;
         }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let accum = '';
+        const liveAtts: AttachmentSummary[] = [];
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const { buffer: nextBuf, events } = consumeSseChunk(buf, decoder.decode(value, { stream: true }));
+          buf = nextBuf;
+          for (const evt of events) {
+            if (evt.type === 'attachment_processed') {
+              liveAtts.push({
+                filename: evt.filename,
+                kind: evt.kind,
+                size: evt.size,
+                mimeType: evt.mimeType,
+                available: evt.available,
+                reason: evt.reason,
+                preview: evt.preview,
+                textLength: evt.textLength ?? 0,
+              });
+              updateAssistant(asstId, { attachments: [...liveAtts] });
+            } else if (evt.type === 'chat_started') {
+              if (evt.sessionId) setSessionId(evt.sessionId);
+            } else if (evt.type === 'retrieval') {
+              updateAssistant(asstId, {
+                retrieval: (evt.retrieval as RetrievalMetadata | null) ?? null,
+              });
+            } else if (evt.type === 'token') {
+              accum += evt.content;
+              updateAssistant(asstId, { content: accum });
+            } else if (evt.type === 'done') {
+              const finalContent = evt.content || accum;
+              if (evt.sessionId) setSessionId(evt.sessionId);
+              updateAssistant(asstId, {
+                content: finalContent,
+                streaming: false,
+                sessionId: evt.sessionId,
+                attachments: liveAtts,
+              });
+            } else if (evt.type === 'error') {
+              setBannerError({ code: evt.code, message: evt.message });
+              updateAssistant(asstId, {
+                streaming: false,
+                error: { code: evt.code, message: evt.message },
+                attachments: liveAtts,
+              });
+            }
+          }
+        }
+        updateAssistant(asstId, { streaming: false });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         setBannerError({ message });
