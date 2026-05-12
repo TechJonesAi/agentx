@@ -57,6 +57,13 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'prefix', prefix: '/api/builder/runs' },
   // (`/api/builder/queue/{cancel,clear}` now real — see api.ts.
   //  Built on lazy-init BuildQueueManager + IdleManager getters.)
+  // /api/builder/run — PERMANENT SHIM (non-restorable from silly-johnson).
+  // Upstream silly declared BuildPlanner/BuildController as `const X: any = null`,
+  // so the route was dead code that always 500'd. A real implementation
+  // requires a separate BuilderV2 design pass; until then this endpoint
+  // returns the honest {available:false, reason:'not implemented on this build'}
+  // envelope so the SPA's Builder page can render a "not available" banner
+  // instead of crashing or faking success. See api.ts for the comment block.
   { kind: 'exact', route: '/api/builder/run' },
   // (`/api/builder/artifacts` now real — see api.ts. Defensive read; returns
   //  {artifacts: []} when the build_artifacts table is absent.)
@@ -99,8 +106,10 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   // (`/api/tts`, `/api/tts/health`, `/api/tts/voices` now real via tts/router)
   // Validation lab
   { kind: 'prefix', prefix: '/api/validation' },
-  // Vision
-  { kind: 'prefix', prefix: '/api/vision' },
+  // (`/api/vision/analyze` POST now real — see api.ts. OllamaVisionProvider
+  //  self-probes; route returns {available:false} when Ollama or qwen3-vl
+  //  isn't reachable. Other /api/vision/* subroutes fall through to the
+  //  catch-all 404 with the safe envelope.)
 ];
 
 const REASON = 'not implemented on this build';

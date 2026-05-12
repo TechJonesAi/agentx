@@ -21,6 +21,17 @@ export type { RoutingConfigValidation, OllamaProbeResult } from './llm/routing-c
 export type { RoutingPolicyConfig } from './llm/routing-policy.js';
 export { DEFAULT_ROUTING_POLICY_CONFIG } from './llm/routing-policy.js';
 export type { RoutingMode } from './llm/model-registry.js';
+// Tier 3 Vision Batch — route-level vision analysis (Strategy 3, no agent.ts).
+// `analyzeImageBuffer` wraps OllamaVisionProvider; tests substitute via
+// setVisionProviderForTesting / clearVisionProviderForTesting.
+export {
+  analyzeImageBuffer,
+  getVisionProvider,
+  setVisionProviderForTesting,
+  clearVisionProviderForTesting,
+} from './multimodal/vision-service.js';
+export type { VisionAnalyzeResult } from './multimodal/vision-service.js';
+export type { VisionProvider } from './multimodal/index.js';
 
 // Memory
 export { createDatabase, ConversationMemory, LongTermMemoryStore } from './memory/index.js';

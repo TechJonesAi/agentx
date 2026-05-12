@@ -140,11 +140,15 @@ describe('Tier 1 safe-batch — 5 newly-real routes', () => {
 
   // (Sanity: confirm a still-shimmed Tier 3 route stays 501.
   //  /api/agent-loops/start became real in Tier 2 batch C (env-gated).
-  //  /api/vision/analyze remains shimmed (Tier 3 — Ollama vision dep).)
-  it('Tier 3 route POST /api/vision/analyze is still shimmed (501)', async () => {
+  //  /api/vision/analyze became real in Tier 3 vision batch.
+  //  /api/builder/run remains PERMANENT shim — silly's BuildPlanner /
+  //  BuildController were `const X: any = null`, so the route was dead
+  //  code upstream and we keep it shimmed honestly.)
+  it('Tier 3 route POST /api/builder/run remains permanent-shimmed (501)', async () => {
     const router = createApiRouter(fakeAgent() as never);
-    const r = await call(router, 'POST', '/api/vision/analyze');
+    const r = await call(router, 'POST', '/api/builder/run');
     expect(r.status).toBe(501);
     expect(r.body['available']).toBe(false);
+    expect(r.body['reason']).toBe('not implemented on this build');
   });
 });

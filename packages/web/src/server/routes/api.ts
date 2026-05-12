@@ -26,6 +26,7 @@ import {
   saveRoutingConfig,
   validateRoutingConfig,
   probeOllamaModels,
+  analyzeImageBuffer,
   type MCPServerConfig,
 } from '@agentx/core';
 
@@ -1333,6 +1334,66 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
           return;
         }
+
+        // ─── Tier 3 Vision Batch: POST /api/vision/analyze ──────────────
+        // Strategy 3: route-level vision analysis. Multipart upload (image
+        // field), 25 MB cap. Delegates to `analyzeImageBuffer` which wraps
+        // OllamaVisionProvider; tests substitute via setVisionProviderForTesting.
+        //
+        // Honest unavailable behaviour:
+        //   - Ollama unreachable or model not installed → 200 {available:false, reason, model}
+        //   - Provider returned a "[…]" placeholder        → 200 {available:false, …}
+        //   - Success                                       → 200 {available:true, description, model, latencyMs}
+        //   - Non-multipart body                            → 400
+        //   - Missing image part                            → 400
+        if (route === '/api/vision/analyze' && method === 'POST') {
+          try {
+            let parsed;
+            try {
+              parsed = await parseMultipartBody(req, { maxBytes: 25 * 1024 * 1024 });
+            } catch (e) {
+              const status = e instanceof MultipartError ? e.status : 400;
+              sendJson(res, status, { error: e instanceof Error ? e.message : String(e) });
+              return;
+            }
+            // Accept the first image-like part. Field names commonly used by
+            // SPA pages: `image`, `file`, `upload`. Anything with a non-empty
+            // buffer is accepted; we validate by simple length/type checks.
+            const imagePart = parsed.files.find((f) =>
+              f.fieldName === 'image' || f.fieldName === 'file' || f.fieldName === 'upload',
+            ) ?? parsed.files[0];
+            if (!imagePart || !imagePart.data || imagePart.data.length === 0) {
+              sendJson(res, 400, { error: 'no image file in multipart body' });
+              return;
+            }
+            const result = await analyzeImageBuffer(imagePart.data);
+            sendJson(res, 200, {
+              ...result,
+              filename: imagePart.filename,
+              size: imagePart.data.length,
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // ─── Tier 3 Builder/run — PERMANENT SHIM (non-restorable) ───────
+        // POST /api/builder/run was dead code in silly-johnson: the upstream
+        // BuildPlanner and BuildController were declared as
+        //   const BuildPlanner: any = null;
+        //   const BuildController: any = null;
+        // i.e. the route existed but could never actually run a build. The
+        // upstream design assumed a separate BuilderV2 service that was
+        // never wired up. Restoring the silly route would only re-introduce
+        // a route that always 500s.
+        //
+        // Decision: keep /api/builder/run permanently shimmed at 501 via
+        // spa-shims.ts. A real implementation requires a separate BuilderV2
+        // design pass (out of scope for the silly-johnson restoration).
+        // The SPA's Builder page already handles {available:false, reason}
+        // by showing a "not available on this build" banner — no crash,
+        // no fake success.
 
         // ─── Tier 3 Builder Batch 1: GET /api/builder/artifacts ─────────
         // Defensive read of the `build_artifacts` table. The table is
