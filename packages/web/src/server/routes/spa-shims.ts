@@ -55,8 +55,8 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   //  /runs handler in api.ts fires before the shim, so the prefix doesn't
   //  intercept it at runtime.)
   { kind: 'prefix', prefix: '/api/builder/runs' },
-  { kind: 'exact', route: '/api/builder/queue/cancel' },
-  { kind: 'exact', route: '/api/builder/queue/clear' },
+  // (`/api/builder/queue/{cancel,clear}` now real — see api.ts.
+  //  Built on lazy-init BuildQueueManager + IdleManager getters.)
   { kind: 'exact', route: '/api/builder/run' },
   // (`/api/builder/artifacts` now real — see api.ts. Defensive read; returns
   //  {artifacts: []} when the build_artifacts table is absent.)

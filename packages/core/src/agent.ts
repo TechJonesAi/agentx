@@ -76,6 +76,10 @@ import { eventBus as agentLoopEventBus } from './agent-loop/event-bus.js';
 import type { AgentLoopState } from './agent-loop/agent-loop-types.js';
 import type { Subagent, SubagentConfig } from './agent-loop/subagent.js';
 import { MultiAgentBuildSupervisor } from './agents/multi-agent-supervisor.js';
+// Tier 3 Builder Batch 2: lazy-init queue + idle manager. Both are
+// self-contained utility classes — no constructor wiring needed.
+import { BuildQueueManager } from './build-queue.js';
+import { IdleManager } from './idle-manager.js';
 import type { HybridOrchestrator } from './hybrid/hybrid-orchestrator.js';
 import type { ModelFabric } from './llm/model-fabric.js';
 // Phase B-merge round 2: additional lifted subsystems exposed via getters
@@ -849,6 +853,26 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getMultiAgentSupervisor(): MultiAgentBuildSupervisor | null { return this._multiAgentSupervisor; }
   getHybridOrchestrator(): HybridOrchestrator | null { return this._hybridOrchestrator; }
   getModelFabric(): ModelFabric | null { return this._modelFabric; }
+
+  /**
+   * Tier 3 Builder Batch 2: lazy-init build queue + idle manager.
+   * Both classes are self-contained (no constructor deps) and have zero
+   * runtime cost until something calls into them. Constructor is NOT
+   * touched — these fields live alongside the existing private fields
+   * but are only allocated on first getter call.
+   */
+  private _buildQueue: BuildQueueManager | null = null;
+  private _idleManager: IdleManager | null = null;
+
+  getBuildQueue(): BuildQueueManager {
+    if (!this._buildQueue) this._buildQueue = new BuildQueueManager();
+    return this._buildQueue;
+  }
+
+  getIdleManager(): IdleManager {
+    if (!this._idleManager) this._idleManager = new IdleManager();
+    return this._idleManager;
+  }
 
   /** Direct access to the better-sqlite3 handle — used by routes that
    * read silly-johnson tables (build_memory, agent_loops, etc.). */

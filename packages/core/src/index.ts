@@ -21,6 +21,12 @@ export { LLMInteractionLogger } from './observability/llm-interaction-logger.js'
 // These are route-level config helpers; no MCP runtime instantiation here.
 export { loadMCPConfig, saveMCPConfig, validateServerConfig } from './mcp/config.js';
 export type { MCPConfig, MCPServerConfig } from './mcp/types.js';
+// Tier 3 Builder Batch 2 re-exports — for /api/builder/queue/{cancel,clear}
+// tests that need to construct the manager classes directly.
+export { BuildQueueManager } from './build-queue.js';
+export type { BuildStatus, BuildQueueState, QueuedBuild } from './build-queue.js';
+export { IdleManager } from './idle-manager.js';
+export type { IdleState, IdleManagerConfig } from './idle-manager.js';
 export {
   ingestUploadedDocument,
   extractTextFromUpload,

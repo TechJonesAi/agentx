@@ -1225,8 +1225,60 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
 
         // Builder queue — read-only (returns empty when not enabled)
+        // ─── Tier 3 Builder Batch 2: queue routes ───────────────────────
+        // GET /api/builder/queue        — silly-shape state + idle status
+        // POST /api/builder/queue/cancel — mark current build cancelled
+        // POST /api/builder/queue/clear  — drain pending queue
+        //
+        // All three use lazy-init getters in agent.ts. Cancel/clear are
+        // best-effort: cancelCurrent() flips state but the runner (not
+        // yet wired) is responsible for actually aborting work. Until
+        // POST /api/builder/run is wired in a later batch, both routes
+        // are correct-shape no-ops on an empty queue.
         if (route === '/api/builder/queue' && method === 'GET') {
-          sendJson(res, 200, { queue: [], available: false, reason: 'BuildQueueManager not yet wired' });
+          try {
+            type Mgr = { getState(): unknown };
+            type Idle = { getStatus(): unknown };
+            const queue = (agent as unknown as { getBuildQueue?: () => Mgr }).getBuildQueue?.();
+            const idle = (agent as unknown as { getIdleManager?: () => Idle }).getIdleManager?.();
+            if (!queue || !idle) {
+              // Defensive: should never happen because the agent has lazy
+              // getters that always return non-null, but leave a safe
+              // fallback so unit tests with stub agents still get JSON.
+              sendJson(res, 200, { queue: [], available: false, reason: 'BuildQueueManager not yet wired' });
+              return;
+            }
+            const state = queue.getState() as Record<string, unknown>;
+            sendJson(res, 200, { ...state, idle: idle.getStatus() });
+          } catch (e) {
+            sendJson(res, 200, { queue: [], available: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        if (route === '/api/builder/queue/cancel' && method === 'POST') {
+          try {
+            type Mgr = { cancelCurrent(): boolean; getState(): unknown };
+            const queue = (agent as unknown as { getBuildQueue?: () => Mgr }).getBuildQueue?.();
+            if (!queue) { sendJson(res, 503, { error: 'Build queue not available' }); return; }
+            const cancelled = queue.cancelCurrent();
+            sendJson(res, 200, { cancelled, state: queue.getState() });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        if (route === '/api/builder/queue/clear' && method === 'POST') {
+          try {
+            type Mgr = { clearQueue(): number; getState(): unknown };
+            const queue = (agent as unknown as { getBuildQueue?: () => Mgr }).getBuildQueue?.();
+            if (!queue) { sendJson(res, 503, { error: 'Build queue not available' }); return; }
+            const cleared = queue.clearQueue();
+            sendJson(res, 200, { cleared, state: queue.getState() });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
           return;
         }
 
