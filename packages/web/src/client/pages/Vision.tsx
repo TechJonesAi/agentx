@@ -225,11 +225,11 @@ export function Vision() {
                 background: pipelineStatus.overall === 'full' ? '#1b3a2d' : pipelineStatus.overall === 'partial' ? '#3a351b' : '#3a1b1b',
                 color: pipelineStatus.overall === 'full' ? '#3fb950' : pipelineStatus.overall === 'partial' ? '#d29922' : '#f85149',
               }}>
-                {pipelineStatus.overall.toUpperCase()}
+                {(pipelineStatus.overall ?? 'unavailable').toUpperCase()}
               </span>
             </div>
             <div style={{ display: 'flex', gap: 'var(--spacing-md)', flexWrap: 'wrap' }}>
-              {pipelineStatus.modalities.map(m => (
+              {(pipelineStatus.modalities ?? []).map(m => (
                 <div
                   key={m.modality}
                   style={{

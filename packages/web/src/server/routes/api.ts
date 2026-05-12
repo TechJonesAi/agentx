@@ -1307,10 +1307,67 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             const dataDir = resolveDataDir();
             const policy = loadRoutingConfig(dataDir);
             const ollama = await probeOllamaModels({ timeoutMs: 5000 });
+            // Models page (Silly Johnson) expects an enriched
+            // `RoutingState`-shaped object with models[] + diagnostics +
+            // config. Provide silly-compatible aliases alongside the
+            // existing test-pinned fields. Live Ollama models → cast to
+            // RegisteredModelView with privacyLevel='local'. Cloud
+            // providers (anthropic/openai) are reported as registered when
+            // their respective API key env vars are present.
+            const liveModels = ollama.models.map((m) => ({
+              id: m.name,
+              provider: 'ollama',
+              capabilities: ['text'],
+              privacyLevel: 'local' as const,
+              enabled: true,
+              ...(typeof m.size === 'number' ? { size: m.size } : {}),
+            }));
+            const cloudModels: Array<Record<string, unknown>> = [];
+            if (process.env['ANTHROPIC_API_KEY']) {
+              cloudModels.push({
+                id: 'claude-sonnet-4-20250514', provider: 'anthropic',
+                capabilities: ['text', 'code', 'reasoning'],
+                privacyLevel: 'cloud', enabled: true,
+              });
+            }
+            if (process.env['OPENAI_API_KEY']) {
+              cloudModels.push({
+                id: 'gpt-4o', provider: 'openai',
+                capabilities: ['text', 'code', 'reasoning'],
+                privacyLevel: 'cloud', enabled: true,
+              });
+            }
+            const models = [...liveModels, ...cloudModels];
             sendJson(res, 200, {
+              // Strategy-3 fields (tests pin these)
               policy,
               availableModels: ollama.models,
               ollama: { reachable: ollama.reachable, host: ollama.host },
+              // Silly-compatible aliases so Models.tsx renders
+              mode: policy.mode,
+              config: {
+                mode: policy.mode,
+                localFirst: policy.mode !== 'SUBSCRIPTION_ONLY',
+                maxLocalFailuresBeforeCloud: policy.maxLocalFailuresBeforeCloud ?? 3,
+                allowCloudForLatencySensitiveTasks: policy.allowCloudForLatencySensitiveTasks ?? false,
+                latencySensitiveThresholdMs: policy.latencySensitiveThresholdMs ?? 1000,
+                capabilityPins: policy.capabilityPins ?? {},
+                contextOverflowTokens: policy.contextOverflowTokens ?? 28_000,
+              },
+              capabilityPins: policy.capabilityPins ?? {},
+              models,
+              fallbackChains: {},
+              capabilityRouting: {},
+              performance: null,
+              diagnostics: {
+                registry: {
+                  totalRegistered: models.length,
+                  enabledCount: models.filter((m) => m.enabled !== false).length,
+                  localCount: liveModels.length,
+                  cloudCount: cloudModels.length,
+                },
+                policy: { cloudAllowed: policy.mode !== 'LOCAL_ONLY' },
+              },
             });
           } catch (e) {
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
