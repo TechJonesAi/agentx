@@ -57,14 +57,10 @@ const KNOWN_UNIMPLEMENTED: ReadonlyArray<
   { kind: 'prefix', prefix: '/api/builder/runs' },
   // (`/api/builder/queue/{cancel,clear}` now real — see api.ts.
   //  Built on lazy-init BuildQueueManager + IdleManager getters.)
-  // /api/builder/run — PERMANENT SHIM (non-restorable from silly-johnson).
-  // Upstream silly declared BuildPlanner/BuildController as `const X: any = null`,
-  // so the route was dead code that always 500'd. A real implementation
-  // requires a separate BuilderV2 design pass; until then this endpoint
-  // returns the honest {available:false, reason:'not implemented on this build'}
-  // envelope so the SPA's Builder page can render a "not available" banner
-  // instead of crashing or faking success. See api.ts for the comment block.
-  { kind: 'exact', route: '/api/builder/run' },
+  // (/api/builder/run now real — see api.ts. BuilderV2-backed AgentX
+  //  original implementation; replaces silly's dead-code stub. Routes
+  //  through BuildQueueManager so the dashboard sees live running/queued
+  //  state, and persists generated files to build_artifacts.)
   // (`/api/builder/artifacts` now real — see api.ts. Defensive read; returns
   //  {artifacts: []} when the build_artifacts table is absent.)
   // (`/api/chat/multimodal` now real — see api.ts. Additive route that

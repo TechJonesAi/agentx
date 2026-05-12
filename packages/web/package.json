@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentx/builder-v2": "workspace:*",
     "@agentx/core": "workspace:*",
     "better-sqlite3": "^11.7.0"
   },

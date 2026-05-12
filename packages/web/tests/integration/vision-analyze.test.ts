@@ -213,13 +213,16 @@ describe('Tier 3 Vision — POST /api/vision/analyze', () => {
   });
 });
 
-describe('Tier 3 Builder/run — permanent shim', () => {
-  it('still returns the honest unavailable envelope', async () => {
+describe('Tier 3 Builder/run — permanent shim swapped to supervisor/restart', () => {
+  // /api/builder/run became a real BuilderV2-backed route. The
+  // permanent-shim contract is now asserted against /api/supervisor/restart
+  // (silly never had a real backend for it either).
+  it('still returns the honest unavailable envelope (supervisor/restart)', async () => {
     const router = createApiRouter(fakeAgent() as never);
-    const r = await callPlain(router, 'POST', '/api/builder/run');
+    const r = await callPlain(router, 'POST', '/api/supervisor/restart');
     expect(r.status).toBe(501);
     expect(r.body['available']).toBe(false);
     expect(r.body['reason']).toBe('not implemented on this build');
-    expect(r.body['endpoint']).toBe('/api/builder/run');
+    expect(r.body['endpoint']).toBe('/api/supervisor/restart');
   });
 });

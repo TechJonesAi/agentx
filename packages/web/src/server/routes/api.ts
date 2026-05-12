@@ -1209,13 +1209,37 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
 
         // BuilderV2 runs — backed by MultiAgentBuildSupervisor when enabled
         if (route === '/api/builder/runs' && method === 'GET') {
+          // First try MultiAgentSupervisor (legacy path). Then fall back to
+          // the BuildQueueManager state which the BuilderV2-backed
+          // /api/builder/run path populates.
           const sup = (agent as unknown as { getMultiAgentSupervisor?: () => { listPlans?: () => unknown[] } | null }).getMultiAgentSupervisor?.();
-          if (!sup) {
+          if (sup) {
+            try {
+              const plans = sup.listPlans?.() ?? [];
+              if (Array.isArray(plans) && plans.length > 0) {
+                sendJson(res, 200, { runs: plans, available: true });
+                return;
+              }
+            } catch { /* fall through to queue */ }
+          }
+          type QueueLike = { getState(): {
+            running: { id: string; appName: string; workspace: string; startedAt: number } | null;
+            queued: Array<{ id: string; appName: string; workspace: string; queuedAt: number }>;
+            completed: Array<{ id: string; appName: string; status: string; completedAt: number }>;
+          } };
+          const queue = (agent as unknown as { getBuildQueue?: () => QueueLike }).getBuildQueue?.();
+          if (!queue) {
             sendJson(res, 200, { runs: [], available: false, reason: 'features.builderV2 is off' });
             return;
           }
           try {
-            sendJson(res, 200, { runs: sup.listPlans?.() ?? [], available: true });
+            const state = queue.getState();
+            const runs = [
+              ...(state.running ? [{ ...state.running, status: 'running' }] : []),
+              ...state.queued.map((q) => ({ ...q, status: 'queued', startedAt: q.queuedAt })),
+              ...state.completed.map((c) => ({ ...c, startedAt: c.completedAt })),
+            ];
+            sendJson(res, 200, { runs, available: true });
           } catch (e) {
             sendJson(res, 200, { runs: [], available: true, error: String(e) });
           }
@@ -2188,22 +2212,81 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
-        // ─── Tier 3 Builder/run — PERMANENT SHIM (non-restorable) ───────
-        // POST /api/builder/run was dead code in silly-johnson: the upstream
-        // BuildPlanner and BuildController were declared as
-        //   const BuildPlanner: any = null;
-        //   const BuildController: any = null;
-        // i.e. the route existed but could never actually run a build. The
-        // upstream design assumed a separate BuilderV2 service that was
-        // never wired up. Restoring the silly route would only re-introduce
-        // a route that always 500s.
+        // ─── Builder/run — REAL implementation (BuilderV2-backed) ───────
+        // Replaces the prior permanent shim. silly-johnson's upstream
+        // /api/builder/run was dead code (BuildPlanner/BuildController =
+        // null). This route is an AgentX original — it adapts the
+        // request to BuilderV2 (packages/builder-v2) via builder-adapter.ts.
         //
-        // Decision: keep /api/builder/run permanently shimmed at 501 via
-        // spa-shims.ts. A real implementation requires a separate BuilderV2
-        // design pass (out of scope for the silly-johnson restoration).
-        // The SPA's Builder page already handles {available:false, reason}
-        // by showing a "not available on this build" banner — no crash,
-        // no fake success.
+        // Body (JSON, 32 KB cap):
+        //   { prompt: string, appName?: string, platform?: string,
+        //     workspace?: string, wait?: boolean }
+        //
+        //   wait=false (default): returns {id, status:"queued"} and the
+        //     build runs through the BuildQueueManager in the background.
+        //     The UI polls /api/builder/queue + /api/builder/artifacts.
+        //   wait=true: blocks until the build finishes and returns the
+        //     full BuildRunResult. Use sparingly; builds can take minutes.
+        //
+        // The route does NOT pre-validate the LLM provider — BuilderV2
+        // throws inside the build if auth/model is missing, and the
+        // queue surfaces the failure with the standard error envelope.
+        if (route === '/api/builder/run' && method === 'POST') {
+          const { body, error } = await readJsonCapped(req, 32 * 1024);
+          if (error) { sendJson(res, 400, { error }); return; }
+          const prompt = typeof body['prompt'] === 'string' ? (body['prompt'] as string).trim() : '';
+          if (!prompt) { sendJson(res, 400, { error: 'prompt field is required' }); return; }
+          const appName = typeof body['appName'] === 'string' ? (body['appName'] as string).trim() : undefined;
+          const platform = typeof body['platform'] === 'string' ? (body['platform'] as string).trim() : undefined;
+          const workspace = typeof body['workspace'] === 'string' ? (body['workspace'] as string).trim() : undefined;
+          const wait = body['wait'] === true;
+
+          // Lazy-import the adapter so this file doesn't pull builder-v2
+          // into the TS dependency graph in unused branches (smaller test
+          // boot when builder-adapter isn't exercised).
+          const { runBuild } = await import('../builder-adapter.js');
+          type QueueLike = {
+            submit(opts: {
+              id: string; appName: string; prompt: string; workspace: string;
+              execute: () => Promise<unknown>;
+            }): Promise<unknown>;
+            getState(): unknown;
+          };
+          const queue = (agent as unknown as { getBuildQueue?: () => QueueLike }).getBuildQueue?.();
+          if (!queue) {
+            sendJson(res, 503, { error: 'Build queue not available' });
+            return;
+          }
+          const buildId = `build-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const wsRoot = workspace ?? `${process.env['HOME']}/Projects/AGENTX_APPS`;
+          const wsPath = `${wsRoot}/${buildId}-${(appName ?? 'app').replace(/[^A-Za-z0-9._-]/g, '_')}`;
+
+          const exec = async () => runBuild(agent as never, {
+            prompt, appName, platform, workspace: wsRoot, sessionId: buildId,
+          });
+
+          if (wait) {
+            try {
+              const result = await queue.submit({
+                id: buildId, appName: appName ?? buildId, prompt, workspace: wsPath, execute: exec,
+              });
+              sendJson(res, 200, { ok: true, id: buildId, result });
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              sendJson(res, 502, { ok: false, id: buildId, error: msg });
+            }
+            return;
+          }
+          // Background mode — fire and forget, return immediately.
+          queue.submit({
+            id: buildId, appName: appName ?? buildId, prompt, workspace: wsPath, execute: exec,
+          }).catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            createLogger('web:builder/run').warn({ buildId, err: msg }, 'Background build failed');
+          });
+          sendJson(res, 200, { ok: true, id: buildId, status: 'queued', workspace: wsPath });
+          return;
+        }
 
         // ─── Tier 3 Builder Batch 1: GET /api/builder/artifacts ─────────
         // Defensive read of the `build_artifacts` table. The table is

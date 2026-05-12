@@ -335,6 +335,9 @@ importers:
 
   packages/web:
     dependencies:
+      '@agentx/builder-v2':
+        specifier: workspace:*
+        version: link:../builder-v2
       '@agentx/core':
         specifier: workspace:*
         version: link:../core
