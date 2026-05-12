@@ -338,6 +338,9 @@ importers:
       '@agentx/core':
         specifier: workspace:*
         version: link:../core
+      better-sqlite3:
+        specifier: ^11.7.0
+        version: 11.10.0
     devDependencies:
       '@types/node':
         specifier: ^22.10.5

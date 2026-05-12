@@ -93,9 +93,13 @@ interface DocumentRow {
   title: string | null;
   sender: string | null;
   subject: string | null;
-  document_date: number | null;
-  ingested_at: number;
+  document_date: number | string | null;
+  ingested_at: number | string | null;
   chunk_count: number | null;
+  /** Silly cognitive_memory.db columns — present when reading that DB. */
+  metadata_json?: string | null;
+  classification_label?: string | null;
+  created_at?: number | string | null;
 }
 
 interface LongTermRow {
@@ -112,13 +116,55 @@ function tableExists(db: DbHandle, name: string): boolean {
   return !!row?.name;
 }
 
+/**
+ * Introspect the `documents` table once and report which optional columns
+ * exist. Silly Johnson's `cognitive_memory.db` doesn't have `title`,
+ * `subject`, `file_type`, `ingested_at`, or `chunk_count`; main's legacy
+ * `documents` table did. The list-query SQL below adapts to whichever set
+ * is present so the same handler works against either DB layout.
+ */
+interface DocSchema {
+  hasTitle: boolean;
+  hasSubject: boolean;
+  hasFileType: boolean;
+  hasIngestedAt: boolean;
+  hasChunkCount: boolean;
+  hasMetadataJson: boolean;
+  hasClassification: boolean;
+  hasCreatedAt: boolean;
+}
+const _docSchemaCache = new WeakMap<DbHandle, DocSchema>();
+function getDocSchema(db: DbHandle): DocSchema {
+  const cached = _docSchemaCache.get(db);
+  if (cached) return cached;
+  let cols = new Set<string>();
+  try {
+    const rows = db.prepare(`PRAGMA table_info(documents)`).all() as Array<{ name?: string }>;
+    cols = new Set(rows.map((r) => r.name ?? '').filter(Boolean));
+  } catch { /* */ }
+  const schema: DocSchema = {
+    hasTitle: cols.has('title'),
+    hasSubject: cols.has('subject'),
+    hasFileType: cols.has('file_type'),
+    hasIngestedAt: cols.has('ingested_at'),
+    hasChunkCount: cols.has('chunk_count'),
+    hasMetadataJson: cols.has('metadata_json'),
+    hasClassification: cols.has('classification_label'),
+    hasCreatedAt: cols.has('created_at'),
+  };
+  _docSchemaCache.set(db, schema);
+  return schema;
+}
+
 function classifyType(d: DocumentRow): MemoryItem['type'] {
   if (d.origin_type === 'email') return 'email';
   if (d.origin_type === 'attachment') return 'attachment';
   const mime = (d.mime_type ?? '').toLowerCase();
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('audio/')) return 'audio';
-  const ft = (d.file_type ?? '').toLowerCase();
+  // Silly cognitive_memory.db uses `source_type` instead of `file_type`.
+  // Treat both as the same hint when classifying.
+  const ft = (d.file_type ?? (d as { source_type?: string }).source_type ?? '').toLowerCase();
   if (
     ft === 'pdf' ||
     ft === 'doc' ||
@@ -133,24 +179,59 @@ function classifyType(d: DocumentRow): MemoryItem['type'] {
   return 'other';
 }
 
-function formatDate(epochMs: number | null): string {
-  if (!epochMs) return '';
+function formatDate(value: number | string | null | undefined): string {
+  if (!value) return '';
   try {
-    return new Date(epochMs).toISOString();
+    // Numeric epoch (ms or seconds) or ISO/SQL date string both accepted.
+    if (typeof value === 'number') {
+      // Treat values < 1e12 as seconds, else ms.
+      const ms = value < 1e12 ? value * 1000 : value;
+      return new Date(ms).toISOString();
+    }
+    const s = String(value);
+    // SQLite CURRENT_TIMESTAMP yields 'YYYY-MM-DD HH:MM:SS' — make it ISO-friendly.
+    const iso = /\d{4}-\d{2}-\d{2}T/.test(s) ? s : s.replace(' ', 'T') + 'Z';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return s; // fall back to raw string
+    return d.toISOString();
   } catch {
     return '';
   }
 }
 
+/**
+ * Schema-tolerant chunk-text accessor. Main's `document_chunks` uses
+ * (content, chunk_number); silly's uses (chunk_text, chunk_index). Probe
+ * once and cache.
+ */
+interface ChunkSchema { textCol: string; orderCol: string }
+const _chunkSchemaCache = new WeakMap<DbHandle, ChunkSchema>();
+function getChunkSchema(db: DbHandle): ChunkSchema {
+  const cached = _chunkSchemaCache.get(db);
+  if (cached) return cached;
+  let cols = new Set<string>();
+  try {
+    const rows = db.prepare(`PRAGMA table_info(document_chunks)`).all() as Array<{ name?: string }>;
+    cols = new Set(rows.map((r) => r.name ?? '').filter(Boolean));
+  } catch { /* */ }
+  const schema: ChunkSchema = {
+    textCol: cols.has('content') ? 'content' : cols.has('chunk_text') ? 'chunk_text' : 'content',
+    orderCol: cols.has('chunk_number') ? 'chunk_number' : cols.has('chunk_index') ? 'chunk_index' : 'rowid',
+  };
+  _chunkSchemaCache.set(db, schema);
+  return schema;
+}
+
 function previewFor(db: DbHandle, documentId: string): { preview: string; words: number } {
   if (!tableExists(db, 'document_chunks')) return { preview: '', words: 0 };
   try {
+    const c = getChunkSchema(db);
     const row = db
       .prepare(
-        `SELECT content FROM document_chunks WHERE document_id = ? ORDER BY chunk_number ASC LIMIT 1`,
+        `SELECT ${c.textCol} AS text FROM document_chunks WHERE document_id = ? ORDER BY ${c.orderCol} ASC LIMIT 1`,
       )
-      .get(documentId) as { content?: string } | undefined;
-    const text = String(row?.content ?? '');
+      .get(documentId) as { text?: string } | undefined;
+    const text = String(row?.text ?? '');
     const words = text.trim() ? text.trim().split(/\s+/).length : 0;
     const preview = text.length > 240 ? text.slice(0, 237) + '…' : text;
     return { preview, words };
@@ -162,11 +243,12 @@ function previewFor(db: DbHandle, documentId: string): { preview: string; words:
 function totalWordCountFor(db: DbHandle, documentId: string): number {
   if (!tableExists(db, 'document_chunks')) return 0;
   try {
+    const c = getChunkSchema(db);
     const rows = db
-      .prepare(`SELECT content FROM document_chunks WHERE document_id = ?`)
-      .all(documentId) as { content?: string }[];
+      .prepare(`SELECT ${c.textCol} AS text FROM document_chunks WHERE document_id = ?`)
+      .all(documentId) as { text?: string }[];
     return rows.reduce((acc, r) => {
-      const text = String(r.content ?? '').trim();
+      const text = String(r.text ?? '').trim();
       return acc + (text ? text.split(/\s+/).length : 0);
     }, 0);
   } catch {
@@ -206,14 +288,26 @@ function docToItem(db: DbHandle, d: DocumentRow): MemoryItem {
   const title = d.title || d.subject || d.file_name;
   // Email-style document — count related attachment-origin docs?
   // For now just report 0 (we'd need a join via subject/thread to be exact).
+  // Silly's `cognitive_memory.db` carries collection in metadata_json.
+  let metadata: Record<string, unknown> | undefined;
+  if (d.metadata_json) {
+    try {
+      const parsed = JSON.parse(d.metadata_json) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object') metadata = parsed;
+    } catch { /* ignore bad JSON */ }
+  }
+  const collection = metadata && typeof metadata['collection'] === 'string'
+    ? (metadata['collection'] as string)
+    : undefined;
+  const dateValue = d.document_date ?? d.ingested_at ?? d.created_at ?? null;
   return {
     id: `doc:${d.document_id}`,
     title: String(title ?? 'Untitled'),
     type,
     sender: d.sender ?? undefined,
-    date: formatDate(d.document_date ?? d.ingested_at),
+    date: formatDate(dateValue),
     preview,
-    source: type === 'email' ? 'email' : (d.origin_type ?? d.file_type ?? 'document'),
+    source: type === 'email' ? 'email' : (collection ?? d.origin_type ?? d.file_type ?? 'document'),
     attachmentCount: 0,
     wordCount: fullWords,
   };
@@ -230,49 +324,84 @@ export function listMemoryItems(
   const items: MemoryItem[] = [];
   const wantsType = (t: MemoryItem['type']) => !query.type || query.type === t;
 
-  // Documents (covers email/document/attachment/image/audio)
+  // Documents (covers email/document/attachment/image/audio).
+  // Schema-tolerant — adapts to legacy main `documents` (title/subject/
+  // file_type/ingested_at/chunk_count) or silly cognitive `documents`
+  // (metadata_json/classification_label/created_at).
   if (tableExists(db, 'documents')) {
+    const s = getDocSchema(db);
+
+    // Build a SELECT that always returns the same column aliases so the
+    // DocumentRow mapping stays uniform.
+    const titleExpr     = s.hasTitle     ? 'title'                                  : 'NULL AS title';
+    const subjectExpr   = s.hasSubject   ? 'subject'                                : 'NULL AS subject';
+    const fileTypeExpr  = s.hasFileType  ? 'file_type'                              : 'NULL AS file_type';
+    const ingestedExpr  = s.hasIngestedAt ? 'ingested_at'                           : 'NULL AS ingested_at';
+    const chunkCntExpr  = s.hasChunkCount ? 'chunk_count'                           : 'NULL AS chunk_count';
+    const metadataExpr  = s.hasMetadataJson ? 'metadata_json'                       : 'NULL AS metadata_json';
+    // `created_at` exists in silly cognitive_memory.db but NOT in main's
+    // legacy `documents` schema (which uses `ingested_at` instead).
+    const createdAtExpr = s.hasCreatedAt ? 'created_at' : 'NULL AS created_at';
+    const selectList = [
+      'document_id', 'file_name', fileTypeExpr, 'mime_type', 'origin_type',
+      titleExpr, 'sender', subjectExpr, 'document_date',
+      ingestedExpr, chunkCntExpr, metadataExpr, createdAtExpr,
+    ].join(', ');
+
     const conditions: string[] = [];
     const params: unknown[] = [];
 
     if (query.q) {
-      // Match against file metadata OR any chunk content. The chunk-content
-      // join is via a sub-EXISTS so we don't have to JOIN+DISTINCT.
-      conditions.push(
-        `(LOWER(file_name) LIKE ? OR LOWER(COALESCE(title,'')) LIKE ? OR LOWER(COALESCE(subject,'')) LIKE ? OR LOWER(COALESCE(sender,'')) LIKE ? OR EXISTS (SELECT 1 FROM document_chunks c WHERE c.document_id = documents.document_id AND LOWER(c.content) LIKE ?))`,
-      );
+      const chunkSchema = getChunkSchema(db);
+      const titleC   = s.hasTitle   ? "LOWER(COALESCE(title,'')) LIKE ?"   : '0';
+      const subjectC = s.hasSubject ? "LOWER(COALESCE(subject,'')) LIKE ?" : '0';
       const needle = `%${query.q.toLowerCase()}%`;
-      params.push(needle, needle, needle, needle, needle);
+      conditions.push(
+        `(LOWER(file_name) LIKE ? OR ${titleC} OR ${subjectC} OR LOWER(COALESCE(sender,'')) LIKE ? OR EXISTS (SELECT 1 FROM document_chunks c WHERE c.document_id = documents.document_id AND LOWER(c.${chunkSchema.textCol}) LIKE ?))`,
+      );
+      params.push(needle);                      // file_name
+      if (s.hasTitle)   params.push(needle);
+      if (s.hasSubject) params.push(needle);
+      params.push(needle, needle);              // sender, chunk content
     }
     if (query.sender) {
       conditions.push(`LOWER(COALESCE(sender,'')) LIKE ?`);
       params.push(`%${query.sender.toLowerCase()}%`);
     }
+    // Date filters operate on document_date with fallback to ingested_at
+    // (legacy) or created_at (silly). Use COALESCE in SQLite where datetime
+    // comparison handles both numeric epoch and ISO strings lexically.
+    const dateOrderExpr = (
+      s.hasIngestedAt && s.hasCreatedAt ? 'COALESCE(document_date, ingested_at, created_at)' :
+      s.hasIngestedAt                   ? 'COALESCE(document_date, ingested_at)' :
+      s.hasCreatedAt                    ? 'COALESCE(document_date, created_at)' :
+                                          'document_date'
+    );
     if (query.dateFrom) {
       const from = Date.parse(query.dateFrom);
       if (!isNaN(from)) {
-        conditions.push(`COALESCE(document_date, ingested_at) >= ?`);
+        conditions.push(`${dateOrderExpr} >= ?`);
         params.push(from);
       }
     }
     if (query.dateTo) {
       const to = Date.parse(query.dateTo);
       if (!isNaN(to)) {
-        conditions.push(`COALESCE(document_date, ingested_at) <= ?`);
+        conditions.push(`${dateOrderExpr} <= ?`);
         params.push(to);
       }
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     try {
-      const sql = `SELECT document_id, file_name, file_type, mime_type, origin_type, title, sender, subject, document_date, ingested_at, chunk_count FROM documents ${where} ORDER BY COALESCE(document_date, ingested_at) DESC LIMIT 1000`;
+      const sql = `SELECT ${selectList} FROM documents ${where} ORDER BY ${dateOrderExpr} DESC LIMIT 1000`;
       const rows = db.prepare(sql).all(...params) as DocumentRow[];
       for (const d of rows) {
         const item = docToItem(db, d);
         if (wantsType(item.type)) items.push(item);
       }
     } catch {
-      // table absent or schema mismatch — fall through
+      // table absent or unexpected schema — fall through to long_term_memory
     }
   }
 
@@ -359,10 +488,21 @@ export function getMemoryDetail(db: DbHandle, id: string): MemoryDetail | null {
     const docId = id.slice('doc:'.length);
     if (!tableExists(db, 'documents')) return null;
     try {
+      const s = getDocSchema(db);
+      const titleExpr     = s.hasTitle     ? 'title'         : 'NULL AS title';
+      const subjectExpr   = s.hasSubject   ? 'subject'       : 'NULL AS subject';
+      const fileTypeExpr  = s.hasFileType  ? 'file_type'     : 'NULL AS file_type';
+      const ingestedExpr  = s.hasIngestedAt ? 'ingested_at'  : 'NULL AS ingested_at';
+      const chunkCntExpr  = s.hasChunkCount ? 'chunk_count'  : 'NULL AS chunk_count';
+      const metadataExpr  = s.hasMetadataJson ? 'metadata_json' : 'NULL AS metadata_json';
+      const createdAtExpr = s.hasCreatedAt ? 'created_at' : 'NULL AS created_at';
+      const selectList = [
+        'document_id', 'file_name', fileTypeExpr, 'mime_type', 'origin_type',
+        titleExpr, 'sender', subjectExpr, 'document_date',
+        ingestedExpr, chunkCntExpr, metadataExpr, createdAtExpr,
+      ].join(', ');
       const d = db
-        .prepare(
-          `SELECT document_id, file_name, file_type, mime_type, origin_type, title, sender, subject, document_date, ingested_at, chunk_count FROM documents WHERE document_id = ?`,
-        )
+        .prepare(`SELECT ${selectList} FROM documents WHERE document_id = ?`)
         .get(docId) as DocumentRow | undefined;
       if (!d) return null;
       // Body = concatenated chunks
@@ -370,12 +510,13 @@ export function getMemoryDetail(db: DbHandle, id: string): MemoryDetail | null {
       let words = 0;
       if (tableExists(db, 'document_chunks')) {
         try {
+          const c = getChunkSchema(db);
           const rows = db
             .prepare(
-              `SELECT content FROM document_chunks WHERE document_id = ? ORDER BY chunk_number ASC`,
+              `SELECT ${c.textCol} AS text FROM document_chunks WHERE document_id = ? ORDER BY ${c.orderCol} ASC`,
             )
-            .all(docId) as { content?: string }[];
-          body = rows.map((r) => r.content ?? '').join('\n\n');
+            .all(docId) as { text?: string }[];
+          body = rows.map((r) => r.text ?? '').join('\n\n');
           words = body.trim() ? body.trim().split(/\s+/).length : 0;
         } catch {
           /* ignore */
@@ -383,14 +524,24 @@ export function getMemoryDetail(db: DbHandle, id: string): MemoryDetail | null {
       }
       const type = classifyType(d);
       const title = d.title || d.subject || d.file_name;
+      // Parse metadata_json so the UI's metadata panel surfaces collection,
+      // book-type, OCR confidence, etc. from silly cognitive_memory.db.
+      let extraMeta: Record<string, unknown> = {};
+      if (d.metadata_json) {
+        try {
+          const parsed = JSON.parse(d.metadata_json);
+          if (parsed && typeof parsed === 'object') extraMeta = parsed as Record<string, unknown>;
+        } catch { /* */ }
+      }
+      const collection = typeof extraMeta['collection'] === 'string' ? extraMeta['collection'] as string : undefined;
       return {
         id,
         title: String(title ?? 'Untitled'),
         type,
         sender: d.sender ?? undefined,
-        date: formatDate(d.document_date ?? d.ingested_at),
+        date: formatDate(d.document_date ?? d.ingested_at ?? d.created_at ?? null),
         body,
-        source: type === 'email' ? 'email' : (d.origin_type ?? d.file_type ?? 'document'),
+        source: type === 'email' ? 'email' : (collection ?? d.origin_type ?? d.file_type ?? 'document'),
         wordCount: words,
         attachments: [],
         metadata: {
@@ -401,6 +552,8 @@ export function getMemoryDetail(db: DbHandle, id: string): MemoryDetail | null {
           subject: d.subject,
           chunk_count: d.chunk_count,
           ingested_at: d.ingested_at,
+          ...(collection ? { collection } : {}),
+          ...extraMeta,
         },
       };
     } catch {

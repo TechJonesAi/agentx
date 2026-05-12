@@ -15,6 +15,7 @@ import {
   deleteMemoryItem,
   bulkDeleteMemoryItems,
 } from './memory-control-center.js';
+import { getMemoryDbHandle, getMemoryDbDiagnostics } from './memory-db.js';
 import { parseMultipartBody, MultipartError } from '../multipart.js';
 import {
   ingestUploadedDocument,
@@ -1092,7 +1093,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // GET /api/memory/gateway/document/:id — alias for the gateway API.
         if (route.startsWith('/api/cognitive/document/') && method === 'GET') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 503, { error: 'no database' }); return; }
             const rawId = decodeURIComponent(route.slice('/api/cognitive/document/'.length));
             const id = rawId.startsWith('doc:') || rawId.startsWith('note:') ? rawId : `doc:${rawId}`;
@@ -1106,7 +1107,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
         if (route.startsWith('/api/memory/gateway/document/') && method === 'GET') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 503, { error: 'no database' }); return; }
             const rawId = decodeURIComponent(route.slice('/api/memory/gateway/document/'.length));
             const id = rawId.startsWith('doc:') || rawId.startsWith('note:') ? rawId : `doc:${rawId}`;
@@ -1120,7 +1121,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
         if (route === '/api/cognitive/search' && method === 'POST') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 200, { items: [], totalCount: 0 }); return; }
             const body = await parseBody(req).catch(() => ({}));
             const q = String((body as { q?: unknown }).q ?? '');
@@ -1136,7 +1137,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // Cognitive diagnostics + documents (read-only DB views)
         if (route === '/api/cognitive/diagnostics' && method === 'GET') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => { prepare(s: string): { get(...a: unknown[]): unknown } } }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent) as unknown as { prepare(s: string): { get(...a: unknown[]): unknown } } | null;
             const counts: Record<string, number> = {};
             if (db) {
               for (const t of ['documents', 'document_chunks', 'entities', 'entity_aliases']) {
@@ -1154,7 +1155,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
         if (route === '/api/cognitive/documents' && method === 'GET') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => { prepare(s: string): { all(...a: unknown[]): unknown[] } } }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent) as unknown as { prepare(s: string): { all(...a: unknown[]): unknown[] } } | null;
             if (!db) { sendJson(res, 200, { documents: [] }); return; }
             try {
               const rows = db.prepare(`SELECT * FROM documents ORDER BY created_at DESC LIMIT 200`).all();
@@ -1426,9 +1427,23 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // Memory stats — basic counts from the DB. Real cognitive memory
         // statistics (working set, episodes, etc.) come later when we wire
         // CategorizedMemoryStore reporting fully.
+        // /api/memory/diagnostics — surfaces which SQLite file the memory
+        // routes are bound to. Useful for confirming the cognitive-memory.db
+        // (silly-johnson) vs agentx.db (legacy) resolution.
+        if (route === '/api/memory/diagnostics' && method === 'GET') {
+          try {
+            // Force resolution if not yet bound, then read diagnostics.
+            await getMemoryDbHandle(agent);
+            sendJson(res, 200, getMemoryDbDiagnostics());
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         if (route === '/api/memory/stats' && method === 'GET') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => { prepare(s: string): { get(): unknown } } }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent) as unknown as { prepare(s: string): { get(): unknown } } | null;
             const counts: Record<string, number> = {};
             if (db) {
               for (const t of ['longterm_memory', 'documents', 'episodes']) {
@@ -1465,7 +1480,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // documents + long_term_memory tables. See memory-control-center.ts.
         if (route === '/api/memory/control-center' && method === 'GET') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 200, { items: [], totalCount: 0 }); return; }
             const u = new URL(url, 'http://x');
             const result = listMemoryItems(db, {
@@ -1486,7 +1501,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
         if (route === '/api/memory/control-center/bulk-delete' && method === 'POST') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 503, { ok: false, deleted: 0, error: 'no database' }); return; }
             const body = await parseBody(req).catch(() => ({}));
             const ids = (body as { ids?: unknown }).ids;
@@ -1501,7 +1516,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
         if (route.startsWith('/api/memory/control-center/') && (method === 'GET' || method === 'DELETE')) {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 503, { error: 'no database' }); return; }
             const id = decodeURIComponent(route.slice('/api/memory/control-center/'.length));
             if (method === 'GET') {
@@ -1529,7 +1544,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         if ((route === '/api/memory/upload-document' || route === '/api/cognitive/ingest')
             && method === 'POST') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 503, { ok: false, error: 'no database' }); return; }
             let parsed;
             try {
@@ -1605,7 +1620,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // Memory gateway query — wraps the same listing for the search box
         if (route === '/api/memory/gateway/query' && method === 'POST') {
           try {
-            const db = (agent as unknown as { getDatabase?: () => import('./memory-control-center.js').DbHandle }).getDatabase?.();
+            const db = await getMemoryDbHandle(agent);
             if (!db) { sendJson(res, 200, { items: [], totalCount: 0 }); return; }
             const body = await parseBody(req).catch(() => ({}));
             const q = String((body as { q?: unknown }).q ?? '');
