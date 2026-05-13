@@ -186,7 +186,13 @@ export function App() {
       if (!('serviceWorker' in navigator)) return;
       // Probe the SW URL first — in dev mode Vite returns HTML (SPA fallback),
       // which causes a MIME-type SecurityError on register(). Skip if not JS.
-      const swUrl = new URL('./service-worker.js', import.meta.url);
+      //
+      // The @vite-ignore is intentional: vite warns because the .js file
+      // doesn't exist at source-resolve time, but our vite.config.ts emits
+      // it at /service-worker.js (a second entry point, root-of-dist, NOT
+      // /assets/). The literal URL is correct at runtime; we just want
+      // vite to stop trying to bundle it as a JS module.
+      const swUrl = new URL(/* @vite-ignore */ './service-worker.js', import.meta.url);
       try {
         const probe = await fetch(swUrl, { method: 'HEAD' });
         const ct = probe.headers.get('content-type') ?? '';

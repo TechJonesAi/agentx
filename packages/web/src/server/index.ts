@@ -147,9 +147,14 @@ export class WebServer {
       return;
     }
 
-    // Serve static files (client UI)
-    if (method === 'GET') {
-      await this.serveStatic(url, res);
+    // Serve static files (client UI). HEAD is needed for the SPA's
+    // service-worker probe: App.tsx fetches `./service-worker.js` with
+    // HEAD before register() to detect dev-mode HTML-fallback and bail
+    // out cleanly. Returning 404 here would also make the SW
+    // unregisterable in production. We piggy-back on serveStatic and
+    // suppress the body downstream when the request method is HEAD.
+    if (method === 'GET' || method === 'HEAD') {
+      await this.serveStatic(url, res, method === 'HEAD');
       return;
     }
 
@@ -162,7 +167,7 @@ export class WebServer {
    * when the file was served, false when the caller should fall through.
    * Path traversal is blocked by resolving and checking the prefix.
    */
-  private tryServeFromSpaDir(url: string, res: http.ServerResponse): boolean {
+  private tryServeFromSpaDir(url: string, res: http.ServerResponse, headOnly = false): boolean {
     // Strip query string & hash, decode URI safely.
     let cleaned = url.split('?')[0].split('#')[0];
     try {
@@ -188,30 +193,34 @@ export class WebServer {
       'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
       'Content-Length': stat.size,
     });
+    if (headOnly) { res.end(); return true; }
     fs.createReadStream(filePath).pipe(res);
     return true;
   }
 
-  private async serveStatic(url: string, res: http.ServerResponse): Promise<void> {
+  private async serveStatic(url: string, res: http.ServerResponse, headOnly = false): Promise<void> {
     const spaReady = spaBuildExists(this.spaDir);
+    const embeddedHtml = (): void => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      if (headOnly) { res.end(); return; }
+      res.end(getEmbeddedHtml());
+    };
 
     // Root: prefer built SPA index.html when available; otherwise embedded HTML.
     if (url === '/' || url === '/index.html') {
-      if (spaReady && this.tryServeFromSpaDir('/index.html', res)) return;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(getEmbeddedHtml());
+      if (spaReady && this.tryServeFromSpaDir('/index.html', res, headOnly)) return;
+      embeddedHtml();
       return;
     }
 
     // Asset/static path: only attempt disk if the SPA was actually built.
     // (Avoids a stat-storm when running with the embedded HTML fallback.)
-    if (spaReady && this.tryServeFromSpaDir(url, res)) return;
+    if (spaReady && this.tryServeFromSpaDir(url, res, headOnly)) return;
 
     // SPA history fallback for non-asset routes (no extension).
     if (!path.extname(url)) {
-      if (spaReady && this.tryServeFromSpaDir('/index.html', res)) return;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(getEmbeddedHtml());
+      if (spaReady && this.tryServeFromSpaDir('/index.html', res, headOnly)) return;
+      embeddedHtml();
       return;
     }
 
