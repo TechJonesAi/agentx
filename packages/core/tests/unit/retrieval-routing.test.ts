@@ -127,6 +127,12 @@ describe('R1.5 — count routing answers from SQL, not vector', () => {
   });
 });
 
+// Windows CI runners on slower disks routinely take 12–18 s for the
+// 25-doc seed loops below (sync better-sqlite3 + FTS5 contentless triggers
+// hit the filesystem on every insert; macOS/Linux finishes in ~1–2 s).
+// Bump the per-test budget so platform-IO speed isn't a fairness gate.
+const SEED_HEAVY_TIMEOUT_MS = 30_000;
+
 describe('R1.5 — exact search does not silently truncate when query asks for "all"', () => {
   it('"show all references to robert moyes" returns all matches, not topK=10', async () => {
     // Seed 25 documents that mention robert moyes — more than the default topK.
@@ -149,7 +155,7 @@ describe('R1.5 — exact search does not silently truncate when query asks for "
     const r = await svc.retrieve('show all references to robert moyes');
     expect(r.intent).toBe('EXACT_SEARCH');
     expect(r.results.length).toBeGreaterThanOrEqual(25);
-  });
+  }, SEED_HEAVY_TIMEOUT_MS);
 
   it('exact search WITHOUT "all" still respects topK', async () => {
     for (let i = 0; i < 25; i++) {
@@ -163,7 +169,7 @@ describe('R1.5 — exact search does not silently truncate when query asks for "
     const r = await svc.retrieve('which documents mention robert moyes', { topK: 5 });
     expect(r.intent).toBe('EXACT_SEARCH');
     expect(r.results.length).toBeLessThanOrEqual(5);
-  });
+  }, SEED_HEAVY_TIMEOUT_MS);
 
   it('"every mention of grievance" returns all matches', async () => {
     for (let i = 0; i < 15; i++) {
@@ -176,7 +182,7 @@ describe('R1.5 — exact search does not silently truncate when query asks for "
     }
     const r = await svc.retrieve('list every mention of grievance');
     expect(r.results.length).toBeGreaterThanOrEqual(15);
-  });
+  }, SEED_HEAVY_TIMEOUT_MS);
 });
 
 describe('R1.5 — strict retrieval rules', () => {

@@ -173,10 +173,28 @@ describe('ShellSandbox', () => {
     });
 
     it('strips sensitive env vars from child process', async () => {
-      const sandbox = new ShellSandbox({ permissionLevel: 'unrestricted' });
-      // Even if ANTHROPIC_API_KEY is set in current env, it should be undefined in child
-      const result = await sandbox.execute('echo $ANTHROPIC_API_KEY');
-      expect(result.stdout.trim()).toBe('');
+      // Real-world security check: set a sentinel value in the parent process,
+      // then assert it does NOT appear in the child's stdout. The shell syntax
+      // differs by platform (POSIX uses $VAR, Windows cmd uses %VAR%); both
+      // are exercised below. On Windows cmd, an unset %VAR% echoes the literal
+      // "%ANTHROPIC_API_KEY%" — that's still fine for the contract, because
+      // the sandbox's job is to strip the value, not to make cmd hide unset
+      // refs. We assert sentinel-absence rather than empty-output so the test
+      // is honest on both shells.
+      const SENTINEL = 'AGENTX-LEAK-CANARY-09128347';
+      const prev = process.env['ANTHROPIC_API_KEY'];
+      process.env['ANTHROPIC_API_KEY'] = SENTINEL;
+      try {
+        const sandbox = new ShellSandbox({ permissionLevel: 'unrestricted' });
+        const cmd = process.platform === 'win32'
+          ? 'echo %ANTHROPIC_API_KEY%'
+          : 'echo $ANTHROPIC_API_KEY';
+        const result = await sandbox.execute(cmd);
+        expect(result.stdout).not.toContain(SENTINEL);
+      } finally {
+        if (prev === undefined) delete process.env['ANTHROPIC_API_KEY'];
+        else process.env['ANTHROPIC_API_KEY'] = prev;
+      }
     });
   });
 });
