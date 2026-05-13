@@ -67,7 +67,16 @@ interface DbLike {
  * ellipsis artifacts at edges don't sabotage the LIKE.
  */
 function snippetAnchor(snippet: string): string | null {
-  const stripped = snippet.replace(/<\/?[a-z][^>]*>/gi, '').trim();
+  // 1. Strip any HTML tags the renderer may have wrapped around matches.
+  // 2. Strip leading/trailing ellipsis markers added by the retrieval layer.
+  // 3. Collapse ALL whitespace runs (incl. newlines, tabs) to single spaces,
+  //    because chunk content in agentx.db preserves PDF line breaks while
+  //    snippets ship as flowed text. The SQL side compensates with REPLACE.
+  const stripped = snippet
+    .replace(/<\/?[a-z][^>]*>/gi, '')
+    .replace(/^[….…\s]+|[….…\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (stripped.length < 12) return null;
   const start = Math.min(8, Math.floor(stripped.length / 4));
   const slice = stripped.slice(start, start + 60).trim();
@@ -115,11 +124,14 @@ export function enrichRetrievalMetadata(
   let stmt;
   try {
     stmt = db.prepare(
+      // Normalize whitespace in chunk content so a snippet anchor with
+      // single spaces matches chunk content that preserves the source
+      // document's newlines/tabs (typical for PDF-derived chunks).
       `SELECT p.page_number AS page_number, p.page_id AS page_id, p.ocr_confidence AS ocr_confidence
          FROM document_chunks c
          JOIN document_pages p ON c.page_id = p.page_id
         WHERE c.document_id = ?
-          AND c.content LIKE ? ESCAPE '\\'
+          AND REPLACE(REPLACE(REPLACE(c.content, X'0A', ' '), X'0D', ' '), X'09', ' ') LIKE ? ESCAPE '\\'
         LIMIT 1`,
     );
   } catch {
