@@ -16,6 +16,12 @@ import {
   bulkDeleteMemoryItems,
 } from './memory-control-center.js';
 import { getMemoryDbHandle, getMemoryDbDiagnostics } from './memory-db.js';
+import {
+  enrichRetrievalMetadata,
+  recordEnrichmentStats,
+  getEnrichmentStats,
+  type ProvenanceMetadataLike,
+} from './retrieval-provenance.js';
 import { getCognitiveServices, getCognitiveDiagnostics } from '../cognitive-adapter.js';
 import { parseMultipartBody, MultipartError } from '../multipart.js';
 import {
@@ -491,7 +497,20 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             await agent.chatStream(message, {
               onRetrieval: (metadata) => {
                 // R3: emit retrieval event BEFORE first token (only when flag is on)
-                res.write(`data: ${JSON.stringify({ type: 'retrieval', retrieval: metadata })}\n\n`);
+                // Enrich with page-level provenance (best-effort, never throws).
+                let outMeta: unknown = metadata;
+                try {
+                  const agentDb = (agent as unknown as { getDatabase?: () => unknown }).getDatabase?.() as
+                    | Parameters<typeof enrichRetrievalMetadata>[0]
+                    | undefined;
+                  const result = enrichRetrievalMetadata(
+                    agentDb ?? null,
+                    metadata as unknown as ProvenanceMetadataLike,
+                  );
+                  recordEnrichmentStats(result);
+                  outMeta = result.metadata;
+                } catch { /* fall back to raw metadata */ }
+                res.write(`data: ${JSON.stringify({ type: 'retrieval', retrieval: outMeta })}\n\n`);
               },
               onToken: (token: string) => {
                 res.write(`data: ${JSON.stringify({ type: 'token', content: token })}\n\n`);
@@ -2270,7 +2289,21 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
                     sessionId?: string,
                   ): Promise<string>;
                 }).chatStream(enriched, {
-                  onRetrieval: (metadata) => write({ type: 'retrieval', retrieval: metadata }),
+                  onRetrieval: (metadata) => {
+                    let outMeta: unknown = metadata;
+                    try {
+                      const agentDb = (agent as unknown as { getDatabase?: () => unknown }).getDatabase?.() as
+                        | Parameters<typeof enrichRetrievalMetadata>[0]
+                        | undefined;
+                      const result = enrichRetrievalMetadata(
+                        agentDb ?? null,
+                        metadata as unknown as ProvenanceMetadataLike,
+                      );
+                      recordEnrichmentStats(result);
+                      outMeta = result.metadata;
+                    } catch { /* */ }
+                    write({ type: 'retrieval', retrieval: outMeta });
+                  },
                   onToken: (token) => {
                     accumulated += token;
                     write({ type: 'token', content: token });
@@ -2610,6 +2643,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
 
             const { getRetrievalSyncState } = await import('./retrieval-sync-state.js');
             const syncState = getRetrievalSyncState();
+            const enrichmentStats = getEnrichmentStats();
             sendJson(res, 200, {
               enabled: effective,
               source: envParsed === undefined ? 'config' : 'env',
@@ -2626,6 +2660,13 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               lastSyncResult: syncState.lastSyncResult,
               lastSyncError: syncState.lastSyncError,
               pendingDocumentCount: syncState.pendingDocumentCount,
+              // Provenance enrichment (R7-page-badge) — counts the most
+              // recent SSE retrieval event's enrichment outcomes plus
+              // a running total since process start.
+              enrichedCount: enrichmentStats.lastEnrichedCount,
+              missingPageCount: enrichmentStats.lastMissingPageCount,
+              totalEnrichedCount: enrichmentStats.totalEnrichedCount,
+              totalMissingPageCount: enrichmentStats.totalMissingPageCount,
               // Honest user-facing summary so the UI can render guidance
               // without recomputing the logic.
               hint:

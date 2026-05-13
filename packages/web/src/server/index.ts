@@ -278,6 +278,7 @@ export function getEmbeddedHtml(): string {
     .source-chip .chip-name { color: #e0e0e0; font-weight: 500; }
     .source-chip .chip-title { color: #888; font-style: italic; }
     .source-chip .chip-type { color: #4ecca3; text-transform: uppercase; font-size: 9px; padding: 1px 4px; background: #0a1a2e; border-radius: 3px; }
+    .source-chip .chip-page { color: #ffc857; text-transform: uppercase; font-size: 9px; padding: 1px 4px; background: #0a1a2e; border: 1px solid #ffc857; border-radius: 3px; letter-spacing: 0.5px; }
     .source-chip .chip-snippet { color: #c0c8d0; font-size: 11px; line-height: 1.4; max-width: 100%; overflow-wrap: anywhere; }
     .source-chip .chip-snippet mark.match { background: #ffc857; color: #1a1a2e; padding: 0 2px; border-radius: 2px; font-weight: 600; }
     /* R11: feedback buttons */
@@ -366,11 +367,18 @@ export function getEmbeddedHtml(): string {
               snippetHtml = escSnip;
             }
           }
+          // Page-level provenance badge — populated by web-server enrichment when available.
+          var pageHtml = '';
+          if (typeof d.pageNumber === 'number') {
+            var pageLabel = d.provenanceLabel ? String(d.provenanceLabel) : ('p. ' + d.pageNumber);
+            pageHtml = '<span class="chip-page" data-page="' + escapeHtml(String(d.pageNumber)) + '">' + escapeHtml(pageLabel) + '</span>';
+          }
           return '<span class="source-chip" data-doc-id="' + escapeHtml(String(d.document_id || '')) + '">' +
             '<span class="chip-row">' +
               '<span class="chip-name">' + fn + '</span>' +
               (title ? '<span class="chip-title">' + title + '</span>' : '') +
               (ftype ? '<span class="chip-type">' + ftype + '</span>' : '') +
+              pageHtml +
             '</span>' +
             (snippetHtml ? '<span class="chip-snippet">' + snippetHtml + '</span>' : '') +
             '</span>';

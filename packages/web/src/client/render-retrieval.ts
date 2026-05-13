@@ -17,6 +17,11 @@ export interface RetrievalMetadataDocumentLike {
   sender?: string;
   snippet?: string;
   matchedPhrase?: string;
+  /** Page-level provenance (added by web-server enrichment helper). */
+  pageNumber?: number;
+  pageId?: string;
+  pageConfidence?: number | null;
+  provenanceLabel?: string;
 }
 
 export interface RetrievalMetadataLike {
@@ -70,11 +75,17 @@ export function renderRetrievalPanelHtml(metadata: RetrievalMetadataLike | null 
       const title = d.title ? escapeHtml(String(d.title)) : '';
       const ftype = d.file_type ? escapeHtml(String(d.file_type)) : '';
       const snippetHtml = d.snippet ? renderSnippetSafe(String(d.snippet), d.matchedPhrase) : '';
+      // Page badge — only when enrichment found a real page_number.
+      const pageLabel = typeof d.pageNumber === 'number'
+        ? (d.provenanceLabel ? String(d.provenanceLabel) : `p. ${d.pageNumber}`)
+        : '';
+      const pageHtml = pageLabel ? `<span class="chip-page" data-page="${escapeHtml(String(d.pageNumber))}">${escapeHtml(pageLabel)}</span>` : '';
       return `<span class="source-chip" data-doc-id="${escapeHtml(String(d.document_id))}">` +
         `<span class="chip-row">` +
           `<span class="chip-name">${fn}</span>` +
           (title ? `<span class="chip-title">${title}</span>` : '') +
           (ftype ? `<span class="chip-type">${ftype}</span>` : '') +
+          pageHtml +
         `</span>` +
         (snippetHtml ? `<span class="chip-snippet">${snippetHtml}</span>` : '') +
         `</span>`;
