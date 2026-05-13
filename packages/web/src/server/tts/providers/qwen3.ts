@@ -32,7 +32,15 @@ export class Qwen3Provider implements TtsProvider {
   private lastSuccessAt: number | null = null;
 
   constructor(baseUrl?: string, timeoutMs?: number) {
-    this.baseUrl = baseUrl ?? process.env['AGENTX_TTS_BASE_URL'] ?? 'http://127.0.0.1:9880';
+    // Precedence: explicit arg > AGENTX_TTS_QWEN3_BASE_URL > AGENTX_TTS_BASE_URL > default.
+    // QWEN3_BASE_URL is the qwen3-specific override; the generic
+    // AGENTX_TTS_BASE_URL is kept for backwards compat with existing
+    // shell profiles. Default matches the sidecar
+    // (packages/launcher/qwen3-tts-server.py listens on 127.0.0.1:9880).
+    this.baseUrl = baseUrl
+      ?? process.env['AGENTX_TTS_QWEN3_BASE_URL']
+      ?? process.env['AGENTX_TTS_BASE_URL']
+      ?? 'http://127.0.0.1:9880';
     this.timeoutMs = timeoutMs ?? parseInt(process.env['AGENTX_TTS_TIMEOUT_MS'] ?? '60000', 10);
     this.healthTimeoutMs = parseInt(process.env['AGENTX_TTS_HEALTH_TIMEOUT_MS'] ?? '2500', 10);
   }
@@ -111,7 +119,7 @@ export class Qwen3Provider implements TtsProvider {
         category === 'timeout'
           ? `No response within ${this.healthTimeoutMs}ms — sidecar may be starting up or overloaded.`
           : category === 'unreachable'
-            ? `No service listening at ${this.baseUrl}. Start the qwen3 sidecar (see README) or set AGENTX_TTS_BASE_URL / AGENTX_TTS_QWEN3_DISABLED=1.`
+            ? `No service listening at ${this.baseUrl}. Start the qwen3 sidecar with \`pnpm tts:start\` (or python3 packages/launcher/qwen3-tts-server.py). Override the URL with AGENTX_TTS_QWEN3_BASE_URL, or silence the provider with AGENTX_TTS_QWEN3_DISABLED=1.`
             : msg;
       return {
         ok: false,
