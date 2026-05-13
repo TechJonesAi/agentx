@@ -69,6 +69,7 @@ function buildCognitiveSource(filePath: string, docs: CognitiveSeedRow[]): void 
       document_id TEXT NOT NULL,
       page_number INTEGER NOT NULL,
       page_text TEXT NOT NULL,
+      extracted_text TEXT,
       ocr_confidence REAL,
       created_at TEXT
     );

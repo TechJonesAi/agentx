@@ -2577,6 +2577,35 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               const row = memDb?.prepare("SELECT COUNT(*) AS n FROM documents").get();
               memoryDocs = Number(row?.n ?? 0);
             } catch { memoryDocs = 0; }
+            // Page counts on both sides + chunks-with-page-id metric.
+            // Memory pages need to be queried against the SOURCE
+            // cognitive_memory.db file (when present) rather than the
+            // memory-db helper handle — once the bridge sync writes
+            // docs into agentx.db, the helper resolves to agentx and
+            // its page count is the retrieval count, not the source.
+            let retrievalPages = 0, memoryPages = 0, retrievalChunksWithPage = 0;
+            try {
+              const row = agentDb?.prepare("SELECT COUNT(*) AS n FROM document_pages").get();
+              retrievalPages = Number(row?.n ?? 0);
+            } catch { /* table absent */ }
+            try {
+              const fs = await import('node:fs');
+              const cognitivePath = path.join(resolveDataDir(), 'cognitive_memory.db');
+              if (fs.existsSync(cognitivePath)) {
+                const mod = (await import('better-sqlite3' as string)) as {
+                  default: new (filename: string, options?: { readonly?: boolean }) => DbLike & { close(): void };
+                };
+                const src = new mod.default(cognitivePath, { readonly: true });
+                try {
+                  const row = src.prepare('SELECT COUNT(*) AS n FROM document_pages').get();
+                  memoryPages = Number(row?.n ?? 0);
+                } finally { try { src.close(); } catch { /* */ } }
+              }
+            } catch { /* */ }
+            try {
+              const row = agentDb?.prepare("SELECT COUNT(*) AS n FROM document_chunks WHERE page_id IS NOT NULL").get();
+              retrievalChunksWithPage = Number(row?.n ?? 0);
+            } catch { /* */ }
             const memDbInfo = getMemoryDbDiagnostics();
 
             const { getRetrievalSyncState } = await import('./retrieval-sync-state.js');
@@ -2588,8 +2617,11 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               envRaw: envRaw ?? null,
               retrievalDb: '(agent.getDatabase) — agentx.db',
               retrievalDocumentCount: retrievalDocs,
+              retrievalPageCount: retrievalPages,
+              retrievalChunksWithPageId: retrievalChunksWithPage,
               memoryDb: memDbInfo.path,
               memoryDocumentCount: memoryDocs,
+              memoryPageCount: memoryPages,
               lastSyncAt: syncState.lastSyncAt,
               lastSyncResult: syncState.lastSyncResult,
               lastSyncError: syncState.lastSyncError,

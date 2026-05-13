@@ -52,6 +52,7 @@ function buildCognitiveSource(filePath: string): void {
       document_id TEXT NOT NULL,
       page_number INTEGER NOT NULL,
       page_text TEXT NOT NULL,
+      extracted_text TEXT,
       ocr_confidence REAL,
       created_at TEXT
     );
@@ -77,18 +78,28 @@ function buildCognitiveSource(filePath: string): void {
     '2026-05-01T14:00:00Z', '2026-05-01T14:00:00Z', 120,
     null, 'text', 'hash-B',
   );
-  // Three chunks for doc-A, one for doc-B
+  // Three pages for doc-A
+  for (let p = 1; p <= 3; p++) {
+    db.prepare(`INSERT INTO document_pages (
+      page_id, document_id, page_number, page_text, extracted_text, ocr_confidence, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+      `page-A-${p}`, 'doc-A', p, `Page ${p} body text.`, `raw page ${p}`,
+      0.85, '2026-04-09T11:00:00Z',
+    );
+  }
+  // Three chunks for doc-A — chunk-i references page-A-(i+1) for provenance
   for (let i = 0; i < 3; i++) {
     db.prepare(`INSERT INTO document_chunks (
-      chunk_id, document_id, chunk_index, chunk_text, token_count, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?)`).run(
-      `chunk-A-${i}`, 'doc-A', i, `Tribunal section ${i + 1}.`, 5, '2026-04-09T11:00:00Z',
+      chunk_id, document_id, page_id, chunk_index, chunk_text, token_count, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+      `chunk-A-${i}`, 'doc-A', `page-A-${i + 1}`, i,
+      `Tribunal section ${i + 1}.`, 5, '2026-04-09T11:00:00Z',
     );
   }
   db.prepare(`INSERT INTO document_chunks (
-    chunk_id, document_id, chunk_index, chunk_text, token_count, created_at
-  ) VALUES (?, ?, ?, ?, ?, ?)`).run(
-    'chunk-B-0', 'doc-B', 0, 'Hello from Alice.', 3, '2026-05-01T14:00:00Z',
+    chunk_id, document_id, page_id, chunk_index, chunk_text, token_count, created_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    'chunk-B-0', 'doc-B', null, 0, 'Hello from Alice.', 3, '2026-05-01T14:00:00Z',
   );
   db.close();
 }
@@ -113,15 +124,44 @@ describe('syncCognitiveToRetrieval', () => {
     try { fs.rmSync(targetDbDir, { recursive: true, force: true }); } catch { /* */ }
   });
 
-  it('writes documents + chunks from cognitive_memory.db into agentx.db', async () => {
+  it('writes documents + chunks + pages from cognitive_memory.db into agentx.db', async () => {
     const r = await syncCognitiveToRetrieval({ sourcePath, targetDb: targetDb as never });
     expect(r.cognitiveDocumentCount).toBe(2);
     expect(r.documentsWritten).toBe(2);
     expect(r.chunksWritten).toBe(4);
+    expect(r.pagesWritten).toBe(3);
     expect(r.documentsSkipped).toBe(0);
+    expect(r.pagesSkipped).toBe(0);
     expect(r.targetDocumentCount).toBe(2);
     expect(r.targetChunkCount).toBe(4);
+    expect(r.targetPageCount).toBe(3);
+    // 3 of 4 chunks reference a page (doc-A chunks); the 1 doc-B chunk has page_id=null
+    expect(r.chunksWithPageId).toBe(3);
     expect(r.documentIds).toEqual(expect.arrayContaining(['doc-A', 'doc-B']));
+  });
+
+  it('preserves chunk page_id → page_number provenance via FK', async () => {
+    await syncCognitiveToRetrieval({ sourcePath, targetDb: targetDb as never });
+    const row = (targetDb as unknown as { prepare(s: string): { get(p: unknown): unknown } })
+      .prepare(`SELECT c.chunk_id, c.page_id, p.page_number, p.content
+                FROM document_chunks c
+                LEFT JOIN document_pages p ON c.page_id = p.page_id
+                WHERE c.chunk_id = ?`)
+      .get('chunk-A-1') as Record<string, unknown>;
+    expect(row['chunk_id']).toBe('chunk-A-1');
+    expect(row['page_id']).toBe('page-A-2');
+    expect(row['page_number']).toBe(2);
+    expect(row['content']).toBe('Page 2 body text.');
+  });
+
+  it('renames page_text → content and extracted_text → raw_content', async () => {
+    await syncCognitiveToRetrieval({ sourcePath, targetDb: targetDb as never });
+    const row = (targetDb as unknown as { prepare(s: string): { get(p: unknown): unknown } })
+      .prepare('SELECT content, raw_content, ocr_confidence FROM document_pages WHERE page_id = ?')
+      .get('page-A-1') as Record<string, unknown>;
+    expect(row['content']).toBe('Page 1 body text.');
+    expect(row['raw_content']).toBe('raw page 1');
+    expect(row['ocr_confidence']).toBe(0.85);
   });
 
   it('is idempotent — running twice produces the same final counts', async () => {
@@ -129,6 +169,7 @@ describe('syncCognitiveToRetrieval', () => {
     const second = await syncCognitiveToRetrieval({ sourcePath, targetDb: targetDb as never });
     expect(second.targetDocumentCount).toBe(2);
     expect(second.targetChunkCount).toBe(4);
+    expect(second.targetPageCount).toBe(3);
     // No duplicates
     const allDocs = (targetDb as unknown as { prepare(s: string): { all(): unknown[] } })
       .prepare('SELECT document_id FROM documents').all() as Array<{ document_id: string }>;

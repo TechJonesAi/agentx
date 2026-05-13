@@ -70,14 +70,22 @@ export interface SyncResult {
   documentsWritten: number;
   /** Chunks successfully written. */
   chunksWritten: number;
+  /** Pages successfully written (page-level provenance). */
+  pagesWritten: number;
+  /** Chunks that carry a valid page_id (a subset of chunksWritten). */
+  chunksWithPageId: number;
   /** Documents skipped because of schema mismatch / missing fields. */
   documentsSkipped: number;
   /** Chunks skipped. */
   chunksSkipped: number;
+  /** Pages skipped. */
+  pagesSkipped: number;
   /** Final row count in target documents table after sync. */
   targetDocumentCount: number;
   /** Final row count in target document_chunks table after sync. */
   targetChunkCount: number;
+  /** Final row count in target document_pages table after sync. */
+  targetPageCount: number;
   /** Doc IDs that were touched (for rollback). */
   documentIds: string[];
   /** ms taken end-to-end. */
@@ -207,20 +215,62 @@ export async function syncCognitiveToRetrieval(opts: {
     let chunksSkipped = 0;
 
     // Pre-compile target statements
+    // Use ON CONFLICT DO UPDATE (UPSERT) rather than INSERT OR REPLACE.
+    // REPLACE deletes the existing row and re-inserts, which fires
+    // DELETE triggers — including the FTS sync triggers that touch the
+    // CONTENTLESS chunks_fts virtual table (migration 007). UPSERT
+    // doesn't fire DELETE triggers, so re-running the sync against an
+    // already-populated agentx.db works cleanly.
     const insertDoc = opts.targetDb.prepare(
-      `INSERT OR REPLACE INTO documents (
+      `INSERT INTO documents (
          document_id, file_name, file_type, mime_type, content_type,
          origin_type, title, sender, subject, document_date,
          page_count, chunk_count, classification_label,
          classification_confidence, extraction_status, indexing_status,
          content_hash, ingested_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(document_id) DO UPDATE SET
+         file_name=excluded.file_name,
+         file_type=excluded.file_type,
+         mime_type=excluded.mime_type,
+         content_type=excluded.content_type,
+         origin_type=excluded.origin_type,
+         title=excluded.title,
+         sender=excluded.sender,
+         subject=excluded.subject,
+         document_date=excluded.document_date,
+         page_count=excluded.page_count,
+         chunk_count=excluded.chunk_count,
+         classification_label=excluded.classification_label,
+         classification_confidence=excluded.classification_confidence,
+         extraction_status=excluded.extraction_status,
+         indexing_status=excluded.indexing_status,
+         content_hash=excluded.content_hash,
+         updated_at=excluded.updated_at`,
     );
     const insertChunk = opts.targetDb.prepare(
-      `INSERT OR REPLACE INTO document_chunks (
+      `INSERT INTO document_chunks (
          chunk_id, document_id, page_id, chunk_number, content,
          token_count, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(chunk_id) DO UPDATE SET
+         document_id=excluded.document_id,
+         page_id=excluded.page_id,
+         chunk_number=excluded.chunk_number,
+         content=excluded.content,
+         token_count=excluded.token_count`,
+    );
+    const insertPage = opts.targetDb.prepare(
+      `INSERT INTO document_pages (
+         page_id, document_id, page_number, content, raw_content,
+         ocr_confidence, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(page_id) DO UPDATE SET
+         document_id=excluded.document_id,
+         page_number=excluded.page_number,
+         content=excluded.content,
+         raw_content=excluded.raw_content,
+         ocr_confidence=excluded.ocr_confidence`,
     );
 
     type ChunkCountRow = { n?: number };
@@ -280,7 +330,55 @@ export async function syncCognitiveToRetrieval(opts: {
       }
     }
 
-    // Pull chunks for the exact set of documents we wrote.
+    // ─── Pages sync — MUST run before chunks (chunks FK-reference pages) ───
+    type CognitivePageRow = {
+      page_id: string;
+      document_id: string;
+      page_number: number;
+      page_text: string;
+      extracted_text: string | null;
+      ocr_confidence: number | null;
+      created_at: string | null;
+    };
+    let cogPages: CognitivePageRow[] = [];
+    if (documentIds.length > 0) {
+      const placeholders = documentIds.map(() => '?').join(',');
+      cogPages = src
+        .prepare(
+          `SELECT page_id, document_id, page_number, page_text, extracted_text,
+                  ocr_confidence, created_at
+           FROM document_pages
+           WHERE document_id IN (${placeholders})
+           ORDER BY document_id ASC, page_number ASC`,
+        )
+        .all(...documentIds) as CognitivePageRow[];
+    }
+    let pagesWritten = 0;
+    let pagesSkipped = 0;
+    /** Track which page_ids successfully landed in the target so we
+     *  can safely emit them on chunks (FK guarantee). */
+    const validPageIds = new Set<string>();
+    for (const p of cogPages) {
+      try {
+        const createdAtMs = parseTextDate(p.created_at, Date.now());
+        insertPage.run(
+          p.page_id,
+          p.document_id,
+          p.page_number,
+          p.page_text,
+          p.extracted_text ?? null,
+          typeof p.ocr_confidence === 'number' ? p.ocr_confidence : null,
+          createdAtMs,
+        );
+        pagesWritten++;
+        validPageIds.add(p.page_id);
+      } catch (err) {
+        pagesSkipped++;
+        log.warn({ err: (err as Error).message, page_id: p.page_id }, 'Failed to write page');
+      }
+    }
+
+    // ─── Chunks sync — page_id passthrough when target page exists ──────
     type CognitiveChunkRow = {
       chunk_id: string;
       document_id: string;
@@ -303,22 +401,27 @@ export async function syncCognitiveToRetrieval(opts: {
         .all(...documentIds) as CognitiveChunkRow[];
     }
 
+    let chunksWithPageId = 0;
     for (const c of cogChunks) {
       try {
         const createdAtMs = parseTextDate(c.created_at, Date.now());
-        // NULL page_id — target document_pages table is not synced in
-        // this batch and the FK would otherwise fail. Chunks remain
-        // searchable; page-level provenance is a follow-up.
+        // Preserve page_id when the page was successfully synced to
+        // target; otherwise NULL to avoid FK violation. This means
+        // chunks for newly-arrived pages will carry full provenance,
+        // while orphan-referenced chunks still get written (just
+        // without their page link).
+        const pageId = c.page_id && validPageIds.has(c.page_id) ? c.page_id : null;
         insertChunk.run(
           c.chunk_id,
           c.document_id,
-          null,
+          pageId,
           c.chunk_index,
           c.chunk_text,
           c.token_count ?? 0,
           createdAtMs,
         );
         chunksWritten++;
+        if (pageId) chunksWithPageId++;
       } catch (err) {
         chunksSkipped++;
         log.warn({ err: (err as Error).message, chunk_id: c.chunk_id }, 'Failed to write chunk');
@@ -331,15 +434,22 @@ export async function syncCognitiveToRetrieval(opts: {
     const targetChunkCount = Number(
       (opts.targetDb.prepare('SELECT COUNT(*) AS n FROM document_chunks').get() as { n?: number } | undefined)?.n ?? 0,
     );
+    const targetPageCount = Number(
+      (opts.targetDb.prepare('SELECT COUNT(*) AS n FROM document_pages').get() as { n?: number } | undefined)?.n ?? 0,
+    );
 
     log.info({
       cognitiveDocumentCount: cogDocs.length,
       documentsWritten,
       chunksWritten,
+      pagesWritten,
+      chunksWithPageId,
       documentsSkipped,
       chunksSkipped,
+      pagesSkipped,
       targetDocumentCount,
       targetChunkCount,
+      targetPageCount,
       durationMs: Date.now() - startedAt,
     }, 'Cognitive → retrieval sync complete');
 
@@ -347,10 +457,14 @@ export async function syncCognitiveToRetrieval(opts: {
       cognitiveDocumentCount: cogDocs.length,
       documentsWritten,
       chunksWritten,
+      pagesWritten,
+      chunksWithPageId,
       documentsSkipped,
       chunksSkipped,
+      pagesSkipped,
       targetDocumentCount,
       targetChunkCount,
+      targetPageCount,
       documentIds,
       durationMs: Date.now() - startedAt,
       sourcePath: opts.sourcePath,
