@@ -272,12 +272,17 @@ describe('Tier 2 batch B — MCP write routes (Strategy 3, no boot init)', () =>
   });
 
   describe('Regressions / safety', () => {
-    it('GET /api/mcp/servers still works (returns []  with available:false)', async () => {
+    it('GET /api/mcp/servers still works (config-file fallback when no manager)', async () => {
+      // Post-bootstrap behaviour: when agent.getMCPClientManager() is null,
+      // the route falls back to the on-disk mcp.json (or DEFAULT_MCP_CONFIG
+      // when missing) so the UI always has something to render. We assert
+      // the shape only — actual servers depend on whether the test host
+      // has a populated ~/.agentx/mcp.json, which we don't override here.
       const router = createApiRouter(fakeAgent() as never);
       const r = await call(router, 'GET', '/api/mcp/servers');
       expect(r.status).toBe(200);
       expect(Array.isArray(r.body['servers'])).toBe(true);
-      expect(r.body['available']).toBe(false);
+      expect('allowRemote' in r.body).toBe(true);
     });
 
     it('GET /api/mcp/tools still works', async () => {

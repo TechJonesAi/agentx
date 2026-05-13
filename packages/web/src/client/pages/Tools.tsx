@@ -578,7 +578,37 @@ function MCPServersPanel() {
           borderRadius: 'var(--radius-md)',
           color: 'var(--text-secondary)', fontSize: 'var(--text-sm)',
         }}>
-          No MCP servers configured yet. A default <code>~/.agentx/mcp.json</code> will be created on next server start with five safe local-only servers (all disabled).
+          <div style={{ marginBottom: 8 }}>
+            No MCP servers configured yet. Create a starter <code>~/.agentx/mcp.json</code> with six safe local-only servers — all disabled by default; nothing auto-connects.
+          </div>
+          <button
+            onClick={async () => {
+              try {
+                const r = await fetch('/api/mcp/bootstrap', { method: 'POST' });
+                const data = await r.json();
+                if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+                setPanelError(
+                  data.bootstrapped
+                    ? `Created starter config at ${data.configPath}. ${data.hint ?? ''}`
+                    : `Existing config preserved (${(data.existing ?? []).length} server(s)). No changes made.`,
+                );
+                await fetchServers();
+              } catch (err) {
+                setPanelError(err instanceof Error ? err.message : 'Bootstrap failed');
+              }
+            }}
+            style={{
+              padding: '8px 16px',
+              background: 'var(--color-primary)',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 'var(--radius-md)',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Create starter config
+          </button>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>

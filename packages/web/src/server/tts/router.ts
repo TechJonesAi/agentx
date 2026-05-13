@@ -48,6 +48,14 @@ export interface ProviderHealth {
   detail?: string;
   qualityScore: number;
   circuitOpen?: boolean;
+  /** Categorized failure mode (qwen3 only today; optional). */
+  category?: string;
+  /** Endpoint URL when applicable — surfaces misconfig at a glance. */
+  endpointUrl?: string;
+  /** Round-trip latency of the health probe. */
+  latencyMs?: number;
+  /** Epoch-ms timestamp of last successful synthesis from this provider. */
+  lastSuccessAt?: number | null;
 }
 
 export interface HealthSummary {
@@ -140,12 +148,23 @@ export class TtsRouter {
           return { id: p.id, enabled: false, ok: false, qualityScore: p.qualityScore };
         }
         try {
-          const h = await p.health();
+          const h = await p.health() as {
+            ok: boolean; detail?: string;
+            category?: string; endpointUrl?: string; latencyMs?: number; lastSuccessAt?: number | null;
+          };
           // If provider is actually healthy, reset the circuit breaker
           if (h.ok && circuitOpen) {
             this.recordSuccess(p.id);
           }
-          return { id: p.id, enabled: true, ok: h.ok, detail: h.detail, qualityScore: p.qualityScore, circuitOpen: circuitOpen && !h.ok };
+          const out: ProviderHealth = {
+            id: p.id, enabled: true, ok: h.ok, detail: h.detail, qualityScore: p.qualityScore,
+            circuitOpen: circuitOpen && !h.ok,
+          };
+          if (h.category !== undefined) out.category = h.category;
+          if (h.endpointUrl !== undefined) out.endpointUrl = h.endpointUrl;
+          if (h.latencyMs !== undefined) out.latencyMs = h.latencyMs;
+          if (h.lastSuccessAt !== undefined) out.lastSuccessAt = h.lastSuccessAt;
+          return out;
         } catch (e) {
           return { id: p.id, enabled: true, ok: false, detail: e instanceof Error ? e.message : String(e), qualityScore: p.qualityScore, circuitOpen };
         }

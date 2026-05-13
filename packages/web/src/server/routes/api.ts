@@ -39,6 +39,7 @@ import {
   resolveOllamaModel,
   syncCognitiveToRetrieval,
   runCognitiveMemoryMigrations,
+  DEFAULT_MCP_CONFIG,
   type MCPServerConfig,
 } from '@agentx/core';
 
@@ -1063,9 +1064,102 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         if (route === '/api/mcp/servers' && method === 'GET') {
           try {
             const mcp = (agent as unknown as { getMCPClientManager?: () => { listServers?: () => unknown[] } | null }).getMCPClientManager?.();
-            sendJson(res, 200, { servers: mcp?.listServers?.() ?? [], available: !!mcp });
+            const fromMgr = mcp?.listServers?.();
+            if (fromMgr && Array.isArray(fromMgr) && fromMgr.length > 0) {
+              // Manager is live — return its runtime view + allowRemote from config.
+              let allowRemote = false;
+              let configEnabled = true;
+              try {
+                const cfg = loadMCPConfig(resolveDataDir(), { createIfMissing: false });
+                allowRemote = cfg.allowRemote === true;
+                configEnabled = Object.keys(cfg.mcpServers).length > 0;
+              } catch { /* */ }
+              sendJson(res, 200, { servers: fromMgr, available: true, allowRemote, enabled: configEnabled });
+              return;
+            }
+            // No live manager (or manager has no servers) — fall back to the
+            // on-disk config so the UI can show the starter set and the user
+            // can toggle / bootstrap without a manager being wired. Synthesise
+            // a runtime-status shape so the client renders the same cards.
+            try {
+              const cfg = loadMCPConfig(resolveDataDir(), { createIfMissing: false });
+              const servers = Object.entries(cfg.mcpServers).map(([name, s]) => ({
+                name,
+                enabled: !!s.enabled,
+                connected: false,
+                transport: s.transport ?? (s.url ? 'http' : 'stdio'),
+                toolCount: 0,
+                safety: s.safety ?? 'green',
+                lastError: null,
+                description: s.description,
+                command: s.command ?? null,
+                args: s.args ?? [],
+                url: s.url ?? null,
+                toolAllowlist: s.toolAllowlist ?? null,
+              }));
+              sendJson(res, 200, {
+                servers,
+                available: servers.length > 0,
+                allowRemote: cfg.allowRemote === true,
+                enabled: true,
+                source: 'config-file',
+                manager: 'not-wired',
+              });
+            } catch (err) {
+              sendJson(res, 200, { servers: [], available: false, allowRemote: false, enabled: false, error: err instanceof Error ? err.message : String(err) });
+            }
           } catch (e) {
             sendJson(res, 200, { servers: [], available: false, error: String(e) });
+          }
+          return;
+        }
+
+        // POST /api/mcp/bootstrap — idempotent starter-config creation.
+        // Behaviour:
+        //   - If mcp.json exists AND has at least one server → no-op,
+        //     returns { bootstrapped:false, existing:[…names…] }.
+        //   - If mcp.json is missing OR has an empty mcpServers map →
+        //     writes DEFAULT_MCP_CONFIG (all servers disabled, allowRemote
+        //     false), returns { bootstrapped:true, written:[…names…] }.
+        //   - Never overwrites a non-empty user config.
+        //   - Never sets allowRemote:true.
+        //   - Never enables a server.
+        if (route === '/api/mcp/bootstrap' && method === 'POST') {
+          try {
+            const dataDir = resolveDataDir();
+            const configPath = path.join(dataDir, 'mcp.json');
+            const exists = fs.existsSync(configPath);
+            let existingNames: string[] = [];
+            if (exists) {
+              try {
+                const cur = loadMCPConfig(dataDir, { createIfMissing: false });
+                existingNames = Object.keys(cur.mcpServers ?? {});
+              } catch { existingNames = []; }
+            }
+            if (existingNames.length > 0) {
+              sendJson(res, 200, {
+                bootstrapped: false,
+                reason: 'config already populated — left untouched',
+                configPath,
+                existing: existingNames,
+                allowRemote: false,
+              });
+              return;
+            }
+            // Missing OR empty servers → write the starter set. saveMCPConfig
+            // performs an atomic tmp+rename, and DEFAULT_MCP_CONFIG has
+            // allowRemote:false and every server enabled:false.
+            saveMCPConfig(dataDir, DEFAULT_MCP_CONFIG);
+            const written = Object.keys(DEFAULT_MCP_CONFIG.mcpServers);
+            sendJson(res, 200, {
+              bootstrapped: true,
+              configPath,
+              written,
+              allowRemote: DEFAULT_MCP_CONFIG.allowRemote === true,
+              hint: 'All starter servers are DISABLED. Enable individually in the Tools page; restart required for the agent to connect to enabled servers.',
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
           }
           return;
         }
