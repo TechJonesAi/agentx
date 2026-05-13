@@ -14,6 +14,7 @@ import { Qwen3Provider } from './providers/qwen3.js';
 import { LovevoiceProvider } from './providers/lovevoice.js';
 import { NaturalReaderProvider } from './providers/naturalreader.js';
 import { SpeechMAProvider } from './providers/speechma.js';
+import { MacOsSayProvider } from './providers/macos-say.js';
 
 // ─── Circuit breaker state per provider ─────────────────────────────────────
 
@@ -275,6 +276,9 @@ export function createTtsRouter(): TtsRouter {
     new LovevoiceProvider(),
     new NaturalReaderProvider(),
     new SpeechMAProvider(),
+    // Local OS fallback — last in the list so qwen3 is preferred whenever
+    // it's healthy, but TTS still works on a stock macOS dev box.
+    new MacOsSayProvider(),
   ];
   return new TtsRouter(providers);
 }
