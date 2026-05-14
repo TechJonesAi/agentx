@@ -160,7 +160,7 @@ describe('Email ingestion runner — end-to-end against a real DB', () => {
   afterAll(() => {
     try { runner.stop(); db.close(); } catch { /* */ }
     try { fs.rmSync(dbDir, { recursive: true, force: true }); } catch { /* */ }
-  });
+  }, 60_000);
 
   it('first runOnce ingests all 3 fixture emails', async () => {
     (runner as unknown as { __setNext: (xs: RawEmail[]) => void }).__setNext(fixtureEmails);

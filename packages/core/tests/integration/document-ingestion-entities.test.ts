@@ -41,7 +41,7 @@ beforeEach(() => {
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-});
+}, 60_000);
 
 function writeTextFile(content: string, name = 'doc.txt'): string {
   const p = path.join(tmpDir, name);

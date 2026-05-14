@@ -82,7 +82,7 @@ afterEach(() => {
   if (prevDataDir === undefined) delete process.env['DATA_DIR'];
   else process.env['DATA_DIR'] = prevDataDir;
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-});
+}, 60_000);
 
 function buildAgent(opts: AgentOpts = {}): Agent {
   return new Agent(writeConfig(tmpDir, opts));

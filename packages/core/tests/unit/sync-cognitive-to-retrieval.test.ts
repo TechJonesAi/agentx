@@ -122,7 +122,7 @@ describe('syncCognitiveToRetrieval', () => {
     try { (targetDb as unknown as { close(): void }).close(); } catch { /* */ }
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
     try { fs.rmSync(targetDbDir, { recursive: true, force: true }); } catch { /* */ }
-  });
+  }, 60_000);
 
   it('writes documents + chunks + pages from cognitive_memory.db into agentx.db', async () => {
     const r = await syncCognitiveToRetrieval({ sourcePath, targetDb: targetDb as never });

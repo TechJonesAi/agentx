@@ -179,7 +179,7 @@ describe('Memory Control Center — end-to-end against a real DB', () => {
   afterAll(() => {
     try { db.close(); } catch { /* ignore */ }
     try { fs.rmSync(dbDir, { recursive: true, force: true }); } catch { /* */ }
-  });
+  }, 60_000);
 
   it('GET /api/memory/control-center returns the 3 inserted items, newest-first', async () => {
     const r = await call(router, 'GET', '/api/memory/control-center');

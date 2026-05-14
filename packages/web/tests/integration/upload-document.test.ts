@@ -157,7 +157,7 @@ Twenty-eight days statutory minimum, inclusive of bank holidays.`;
   afterAll(() => {
     try { db.close(); } catch { /* */ }
     try { fs.rmSync(dbDir, { recursive: true, force: true }); } catch { /* */ }
-  });
+  }, 60_000);
 
   it('POST /api/memory/upload-document accepts a TXT file and returns document_id', async () => {
     const r = await multipartCall(router, '/api/memory/upload-document', [

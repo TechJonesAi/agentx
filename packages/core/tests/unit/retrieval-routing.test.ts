@@ -24,7 +24,9 @@ let fts: FtsIndexService;
 // Hook timeout — the migrations call inside this beforeEach takes 5–8 s
 // on Windows GitHub runners (FTS5 contentless + sync better-sqlite3 + slow
 // disk IO); ~50 ms on Linux/macOS. Vitest default 10 000 ms hook budget
-// fires on Windows. Bump only this hook.
+// fires on Windows. 60s held for most rounds, but CI run 25847326383's
+// windows-22 runner took 12m10s total (~2x typical) and exceeded even
+// 60s on this hook. Bumped to 120s for outlier-runner resilience.
 beforeEach(() => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-routing-'));
   dbPath = path.join(tmp, 'cog.db');
@@ -33,7 +35,7 @@ beforeEach(() => {
   svc = new RetrievalService(db);
   registry = new DocumentRegistry(db);
   fts = new FtsIndexService(db);
-}, 60_000);
+}, 120_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }

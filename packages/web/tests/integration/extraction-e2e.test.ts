@@ -120,7 +120,7 @@ describe('Extraction end-to-end through upload + cognitive routes', () => {
   afterAll(() => {
     try { db.close(); } catch { /* */ }
     try { fs.rmSync(dbDir, { recursive: true, force: true }); } catch { /* */ }
-  });
+  }, 60_000);
 
   it('TXT upload appears in memory + searchable', async () => {
     const r = await call(router, 'POST', '/api/memory/upload-document', {
@@ -290,7 +290,7 @@ describe('Email runner — HTML fallback + attachment ingestion', () => {
   afterAll(() => {
     try { runner.stop(); db.close(); } catch { /* */ }
     try { fs.rmSync(dbDir, { recursive: true, force: true }); } catch { /* */ }
-  });
+  }, 60_000);
 
   it('HTML-only email: body extracted via stripHtmlToText', async () => {
     nextEmails = [{

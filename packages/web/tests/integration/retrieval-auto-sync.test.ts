@@ -136,7 +136,7 @@ describe('Retrieval auto-sync state machine', () => {
     try { (targetDb as unknown as { close(): void }).close(); } catch { /* */ }
     fs.rmSync(tmpDir, { recursive: true, force: true });
     fs.rmSync(targetDbDir, { recursive: true, force: true });
-  });
+  }, 60_000);
 
   it('initial state has no lastSync and 0 pending', () => {
     const s = getRetrievalSyncState();

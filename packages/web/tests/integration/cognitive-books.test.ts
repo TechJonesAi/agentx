@@ -143,7 +143,7 @@ describe('Cognitive Books — end-to-end against real DB', () => {
   afterAll(() => {
     if (savedDataDir === undefined) delete process.env['DATA_DIR'];
     else process.env['DATA_DIR'] = savedDataDir;
-  });
+  }, 60_000);
 
   beforeEach(() => {
     db.exec(`DELETE FROM document_pages; DELETE FROM document_chunks; DELETE FROM documents;`);

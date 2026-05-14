@@ -46,7 +46,7 @@ beforeEach(() => {
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-});
+}, 60_000);
 
 describe('ImportanceScorer — computeImportance', () => {
   it('returns a score with all six components plus overall', () => {

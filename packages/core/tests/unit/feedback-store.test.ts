@@ -21,7 +21,7 @@ beforeEach(() => {
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
-});
+}, 60_000);
 
 describe('FeedbackStore — schema bootstrap', () => {
   it('creates the chat_feedback table on construction', () => {
