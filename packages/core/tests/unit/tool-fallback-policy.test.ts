@@ -53,15 +53,27 @@ beforeEach(() => {
 }, 60_000);
 
 afterEach(() => {
+  // Close every Agent + DB we built this test so Windows can unlink the
+  // tmp dir. better-sqlite3 holds the .db file open until close(); on
+  // Windows fs.rmSync throws EBUSY if any handle is still alive.
+  for (const a of agentsBuilt) {
+    try { (a as unknown as { shutdown?: () => Promise<void> }).shutdown?.(); } catch { /* */ }
+    try { (a as unknown as { db?: { close?: () => void } }).db?.close?.(); } catch { /* */ }
+  }
+  agentsBuilt.length = 0;
   fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   if (prevDataDir === undefined) delete process.env['DATA_DIR']; else process.env['DATA_DIR'] = prevDataDir;
 }, 60_000);
+
+// Track every Agent built in a given test so afterEach can close them.
+const agentsBuilt: Agent[] = [];
 
 interface MockToolRecorder { calls: Array<{ name: string; args: Record<string, unknown> }> }
 
 function buildAgent(localOnly: boolean): { agent: Agent; rec: MockToolRecorder } {
   const cfgPath = writeCfg(tmpDir, localOnly);
   const agent = new Agent(cfgPath);
+  agentsBuilt.push(agent);
   // Seed minimal cognitive schema (the agent ctor already runs it but
   // we want explicit docs).
   const db = (agent as unknown as { db: { exec(s: string): void; prepare(s: string): { run(...a: unknown[]): unknown; all(): unknown[] } } }).db;
