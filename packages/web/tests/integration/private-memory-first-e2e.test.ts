@@ -448,8 +448,28 @@ async function buildRig(): Promise<TestRig> {
 async function teardownRig(rig: TestRig): Promise<void> {
   rig.fetchRec.restore();
   await new Promise<void>(r => rig.server.close(() => r()));
-  try { (rig.agent as unknown as { shutdown?: () => Promise<void> }).shutdown?.(); } catch { /* */ }
-  fs.rmSync(rig.dataDir, { recursive: true, force: true });
+  // Best-effort agent shutdown.
+  try {
+    const sd = (rig.agent as unknown as { shutdown?: () => Promise<void> | void }).shutdown;
+    if (typeof sd === 'function') await Promise.resolve(sd.call(rig.agent));
+  } catch { /* */ }
+  // CRITICAL on Windows: better-sqlite3 holds the .db file open. fs.rmSync
+  // throws EBUSY if we try to unlink while the handle lives. Close the DB
+  // explicitly before removing the tmp dir. agent.db is a private field;
+  // we access it via cast.
+  try {
+    const db = (rig.agent as unknown as { db?: { close?: () => void } }).db;
+    if (db?.close) db.close();
+  } catch { /* */ }
+  // Even with close, the WAL/SHM files can linger briefly on Windows. Use
+  // fs.rm's built-in retry knobs (Node ≥ 14.14) so we don't race the
+  // filesystem on slow CI runners.
+  fs.rmSync(rig.dataDir, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
   for (const [k, v] of Object.entries(rig.prevEnv)) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
