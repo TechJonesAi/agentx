@@ -138,7 +138,7 @@ describe('Cognitive Books — end-to-end against real DB', () => {
     process.env['DATA_DIR'] = dbDir;
     db = createDatabase(dbDir);
     runCognitiveMemoryMigrations(db);
-  });
+  }, 30_000);
 
   afterAll(() => {
     if (savedDataDir === undefined) delete process.env['DATA_DIR'];

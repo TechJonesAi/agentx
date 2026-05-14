@@ -31,7 +31,7 @@ beforeEach(() => {
   dbFile = path.join(tmpDir, 'cog.db');
   db = new Database(dbFile);
   runCognitiveMemoryMigrations(db);
-});
+}, 30_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }

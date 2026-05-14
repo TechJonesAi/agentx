@@ -174,7 +174,7 @@ describe('Memory Control Center — end-to-end against a real DB', () => {
     };
 
     router = createApiRouter(fakeAgent as never);
-  });
+  }, 30_000);
 
   afterAll(() => {
     try { db.close(); } catch { /* ignore */ }

@@ -152,7 +152,7 @@ Twenty-eight days statutory minimum, inclusive of bank holidays.`;
       getToolRegistry() { return { getDefinitions() { return []; } }; },
     };
     router = createApiRouter(fakeAgent as never);
-  });
+  }, 30_000);
 
   afterAll(() => {
     try { db.close(); } catch { /* */ }

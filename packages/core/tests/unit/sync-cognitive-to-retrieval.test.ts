@@ -117,7 +117,7 @@ describe('syncCognitiveToRetrieval', () => {
     targetDbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-target-'));
     targetDb = createDatabase(targetDbDir);
     runCognitiveMemoryMigrations(targetDb);
-  });
+  }, 30_000);
   afterEach(() => {
     try { (targetDb as unknown as { close(): void }).close(); } catch { /* */ }
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }

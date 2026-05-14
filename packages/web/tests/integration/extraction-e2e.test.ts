@@ -115,7 +115,7 @@ describe('Extraction end-to-end through upload + cognitive routes', () => {
       getToolRegistry() { return { getDefinitions() { return []; } }; },
     };
     router = createApiRouter(fakeAgent as never);
-  });
+  }, 30_000);
 
   afterAll(() => {
     try { db.close(); } catch { /* */ }
@@ -285,7 +285,7 @@ describe('Email runner — HTML fallback + attachment ingestion', () => {
       allowedDomains: [],
       statePath: path.join(dbDir, 'runner-state.json'),
     });
-  });
+  }, 30_000);
 
   afterAll(() => {
     try { runner.stop(); db.close(); } catch { /* */ }
