@@ -218,7 +218,7 @@ describe('R10 — bounded metadata limit (all-mode)', () => {
     expect(meta.retrievalMatchCount).toBe(200); // accurate, full count
     expect(meta.retrievalDocuments.length).toBe(50); // capped
     await agent.shutdown?.();
-  });
+  }, 30_000);  // Windows IO budget — 200-doc seed loop + entity links + retrieval
 
   it('explicit maxMetadataDocs=10 caps to 10 while count remains full', async () => {
     const agent = buildAgent({ retrieval: { enabled: true, maxMetadataDocs: 10 } });

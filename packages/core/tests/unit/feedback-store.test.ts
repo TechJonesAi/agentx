@@ -9,11 +9,14 @@ let tmpDir: string;
 let db: Database.Database;
 let store: FeedbackStore;
 
+// Windows IO budget — better-sqlite3 cold open + FeedbackStore schema
+// bootstrap routinely takes 6-12s on GitHub Windows runners under load
+// (vs ~30ms on Unix). Default 10000ms hook budget is insufficient.
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-fbk-'));
   db = new Database(path.join(tmpDir, 'fbk.db'));
   store = new FeedbackStore(db);
-});
+}, 30_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }

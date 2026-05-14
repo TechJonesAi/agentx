@@ -33,12 +33,15 @@ let tmpDir: string;
 let db: SqliteMemoryDb;
 let scorer: ImportanceScorer;
 
+// Windows IO budget — SqliteMemoryDb open + categorized-memory stub
+// creation hits FS hard. ~30ms on Unix but routinely 6-10s on slow
+// GitHub Windows runners. Default 10000ms hook budget is insufficient.
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-importance-'));
   db = new SqliteMemoryDb(tmpDir);
   createCategorizedMemoryStub(db);
   scorer = new ImportanceScorer(db);
-});
+}, 30_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }

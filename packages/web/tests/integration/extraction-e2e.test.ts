@@ -239,7 +239,7 @@ describe('Extraction end-to-end through upload + cognitive routes', () => {
     const u = (r.body['uploaded'] as Array<Record<string, unknown>>)[0];
     expect(u['file_type']).toBe('pdf');
     expect((u['warnings'] as string[]).length).toBeGreaterThan(0);
-  });
+  }, 30_000);  // Windows IO budget — pdf-parse + multipart roundtrip on slow disk
 
   it('GET /api/cognitive/document/:id returns the doc detail', async () => {
     // Upload one fresh doc, then fetch by id
