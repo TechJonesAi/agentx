@@ -135,7 +135,10 @@ describe('R1.5 — count routing answers from SQL, not vector', () => {
 // 25-doc seed loops below (sync better-sqlite3 + FTS5 contentless triggers
 // hit the filesystem on every insert; macOS/Linux finishes in ~1–2 s).
 // Bump the per-test budget so platform-IO speed isn't a fairness gate.
-const SEED_HEAVY_TIMEOUT_MS = 30_000;
+// Round-5 bump (CI run 25846558591): a slow windows-22 runner exceeded
+// the 30s budget on the "show all references" seed loop. 60s matches
+// the harness's SLOW budget and the round-5 migrations bump.
+const SEED_HEAVY_TIMEOUT_MS = 60_000;
 
 describe('R1.5 — exact search does not silently truncate when query asks for "all"', () => {
   it('"show all references to robert moyes" returns all matches, not topK=10', async () => {

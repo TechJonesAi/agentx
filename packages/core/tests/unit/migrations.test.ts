@@ -35,7 +35,12 @@ function columnNames(database: Database.Database, tableName: string): string[] {
 // the sync better-sqlite3 + filesystem IO routinely takes 5–8 s for a single
 // run; Linux/macOS finishes in ~50–100 ms. Per-test budget bumped to 30 s
 // so platform IO speed isn't a fairness gate.
-const SLOW_IO_TIMEOUT_MS = 30_000;
+// Round-5 bump (CI run 25846558591): a slow windows-22 runner (6m46s
+// total job time) exceeded the 30s per-`it` budget for the very first
+// migrations test. 60s matches the harness's SLOW budget and gives
+// headroom for the most-loaded Windows runner seen so far. Same class
+// of fix as document-ingestion-entities (e74e671).
+const SLOW_IO_TIMEOUT_MS = 60_000;
 
 describe('cognitive memory migrations', () => {
   it('applies all migrations cleanly on a fresh database', () => {
