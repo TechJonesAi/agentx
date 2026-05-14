@@ -29,18 +29,26 @@ function columnNames(database: Database.Database, tableName: string): string[] {
   return rows.map(r => r.name);
 }
 
+// Each `it` here invokes runCognitiveMemoryMigrations() once on a fresh
+// SQLite, which applies 6 migrations including 007_fts_contentless's FTS5
+// virtual table + INSERT/DELETE triggers. On Windows GitHub-hosted runners
+// the sync better-sqlite3 + filesystem IO routinely takes 5–8 s for a single
+// run; Linux/macOS finishes in ~50–100 ms. Per-test budget bumped to 30 s
+// so platform IO speed isn't a fairness gate.
+const SLOW_IO_TIMEOUT_MS = 30_000;
+
 describe('cognitive memory migrations', () => {
   it('applies all migrations cleanly on a fresh database', () => {
     const result = runCognitiveMemoryMigrations(db);
     expect(result.count).toBe(6);
     expect(result.ftsAvailable).toBe(true);
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('is idempotent — re-running applies zero new migrations', () => {
     runCognitiveMemoryMigrations(db);
     const second = runCognitiveMemoryMigrations(db);
     expect(second.count).toBe(0);
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('records every migration in the schema_migrations_cognitive table', () => {
     runCognitiveMemoryMigrations(db);
@@ -53,7 +61,7 @@ describe('cognitive memory migrations', () => {
       '006_document_identity',
       '007_fts_contentless',
     ]);
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('migration 002 — creates learning_signals table', () => {
     runCognitiveMemoryMigrations(db);
@@ -61,7 +69,7 @@ describe('cognitive memory migrations', () => {
     const cols = columnNames(db, 'learning_signals');
     expect(cols).toContain('signal_id');
     expect(cols).toContain('signal_type');
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('migration 003 — creates entity_aliases table', () => {
     runCognitiveMemoryMigrations(db);
@@ -70,7 +78,7 @@ describe('cognitive memory migrations', () => {
     expect(cols).toContain('alias_id');
     expect(cols).toContain('canonical_entity_id');
     expect(cols).toContain('alias_name');
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('migration 005 — creates episodes and episode_events tables', () => {
     runCognitiveMemoryMigrations(db);
@@ -80,14 +88,14 @@ describe('cognitive memory migrations', () => {
     expect(epCols).toEqual(expect.arrayContaining(['id', 'session_id', 'status', 'started_at']));
     const evCols = columnNames(db, 'episode_events');
     expect(evCols).toEqual(expect.arrayContaining(['id', 'episode_id', 'event_type', 'content']));
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('migration 006 — adds source_type and parent_document_id to documents', () => {
     runCognitiveMemoryMigrations(db);
     const cols = columnNames(db, 'documents');
     expect(cols).toContain('source_type');
     expect(cols).toContain('parent_document_id');
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('partial application — pre-existing migration_id rows are skipped', () => {
     db.exec(`CREATE TABLE schema_migrations_cognitive (migration_id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`);
@@ -96,5 +104,5 @@ describe('cognitive memory migrations', () => {
     db.exec(fs.readFileSync(path.join(__dirname, '../../src/db/migrations/001_cognitive_memory.sql'), 'utf-8'));
     const result = runCognitiveMemoryMigrations(db);
     expect(result.count).toBe(5); // 002, 003, 005, 006, 007 applied, 001 skipped
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 });
