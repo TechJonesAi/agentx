@@ -39,6 +39,15 @@ import { detectRedFlag, type RedFlagResult } from './reasoning/redflag-gate.js';
 import { DecisionEngine, type DecisionEngineInput, type DecisionSummary, type ExecutionTrace } from './reasoning/decision-engine.js';
 import { RetrievalService } from './retrieval/retrieval-service.js';
 import { extractSnippet } from './retrieval/snippet-extractor.js';
+import {
+  assessRetrievalSufficiency,
+  type RetrievalSufficiencyDecision,
+} from './reasoning/retrieval-sufficiency.js';
+import {
+  DecisionTraceBuffer,
+  type PrivateMemoryEvent,
+} from './observability/private-memory-events.js';
+import { TOOL_PERMISSION_MAP } from './tools/registry.js';
 import { runCognitiveMemoryMigrations } from './db/migrations/index.js';
 import { DocumentRegistry } from './memory/document-registry.js';
 import type { QueryIntent, RetrievalResult } from './memory/types.js';
@@ -182,6 +191,11 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   // R11: feedback store (always available, no flag)
   private _feedbackStore: FeedbackStore;
+
+  // Batch A2 — Private-memory-first enforcement state.
+  private _localOnly = false;
+  private _lastSufficiencyDecision: RetrievalSufficiencyDecision | null = null;
+  private _decisionTrace = new DecisionTraceBuffer();
 
   // ─── Phase B-merge: silly-johnson subsystems (additive, all opt-in) ─────
   // Lazy: only instantiated when config.features.* enables them, or never
@@ -372,6 +386,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       });
     }
 
+    // Batch A2 — Private-memory-first / localOnly state.
+    this._localOnly = this.config.agent.localOnly === true;
+
     // R2: Initialize retrieval integration if enabled
     if (this.config.agent.retrieval?.enabled) {
       runCognitiveMemoryMigrations(this.db);
@@ -549,6 +566,19 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getLastRedFlag(): RedFlagResult | null { return this._lastRedFlag; }
   getLastForceReasoning(): boolean | null { return this._intelligenceEnabled ? this._lastForceReasoning : null; }
 
+  // Batch A2 — Private-memory-first decision trace.
+  /** Snapshot of structured decision events emitted during the most-recent
+   *  chat()/chatStream() call. Reset at the start of each call. */
+  getLastDecisionTrace(): PrivateMemoryEvent[] { return this._decisionTrace.snapshot(); }
+  /** Sufficiency decision for the most-recent retrieval. Null when retrieval
+   *  did not run (e.g. flag off, error, or no-op). */
+  getLastSufficiencyDecision(): RetrievalSufficiencyDecision | null {
+    return this._lastSufficiencyDecision;
+  }
+  /** True when AgentX is enforcing localOnly mode (no cloud providers,
+   *  no network-class tools). */
+  isLocalOnly(): boolean { return this._localOnly; }
+
   // R2/R3/R10: Retrieval wiring with timeout + bounded metadata + stats logging.
   // Errors are logged but never propagate — chat must always continue.
   private async _buildRetrievalContext(input: string): Promise<string | null> {
@@ -560,6 +590,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     this._lastRetrievalResults = [];
     this._lastRetrievalStats = null;
     this._lastRetrievalError = null;
+    // Batch A2 — reset private-memory decision trace + sufficiency.
+    this._decisionTrace.reset();
+    this._lastSufficiencyDecision = null;
+    this._decisionTrace.emit({ event: 'retrieval_started', query: input });
 
     const start = Date.now();
     try {
@@ -635,6 +669,35 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         elapsedMs,
       };
       log.info({ ...this._lastRetrievalStats, exposedDocs: cappedDocs.length }, 'retrieval');
+
+      // Batch A2 — emit retrieval_results + assess sufficiency.
+      this._decisionTrace.emit({
+        event: 'retrieval_results',
+        matchCount: this._lastRetrievalMetadata.retrievalMatchCount,
+        source: String(source),
+        intent: String(r.intent),
+        elapsedMs,
+      });
+      const decision = assessRetrievalSufficiency({
+        query: input,
+        retrievalMatchCount: this._lastRetrievalMetadata.retrievalMatchCount,
+        retrievalDocuments: cappedDocs.map((d) => ({
+          document_id: d.document_id,
+          file_name: d.file_name,
+          title: d.title,
+          sender: d.sender ?? null,
+          snippet: d.snippet,
+        })),
+      });
+      this._lastSufficiencyDecision = decision;
+      this._decisionTrace.emit({
+        event: 'retrieval_sufficiency_decision',
+        sufficient: decision.sufficient,
+        reason: decision.reason,
+        matchedDocumentIds: decision.matchedDocumentIds,
+        matchedTerms: decision.matchedTerms,
+        score: decision.score,
+      });
 
       // Build the prompt-injection string
       if (r.intent === 'COUNT') {
@@ -1581,6 +1644,43 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   }
 
   private async executeToolCall(toolCall: ToolCall, sessionId: string): Promise<string> {
+    // Batch A2 — Private-memory-first policy gate.
+    // Network-class tools (TOOL_PERMISSION_MAP[name] === 'network') are
+    // blocked when EITHER:
+    //   - retrieval sufficiency for the current call is true, OR
+    //   - localOnly mode is enabled.
+    // Blocked calls return a synthetic result that informs the LLM the
+    // tool was suppressed — the LLM's next turn answers from memory.
+    // Non-network tools (shell, memory_*, current_time, etc.) are
+    // unaffected. The decision is recorded in the decision trace for
+    // tests + UI surfaces.
+    const networkClass = TOOL_PERMISSION_MAP[toolCall.name] === 'network';
+    if (networkClass) {
+      const sufficient = this._lastSufficiencyDecision?.sufficient === true;
+      if (this._localOnly) {
+        this._decisionTrace.emit({ event: 'tool_fallback_blocked', tool: toolCall.name, reason: 'local_only' });
+        this._decisionTrace.emit({ event: 'external_request_blocked', host: '(' + toolCall.name + ')', reason: 'local_only' });
+        return JSON.stringify({
+          blocked: true,
+          reason: 'local_only',
+          tool: toolCall.name,
+          message: 'Network-class tool blocked: AgentX is running in localOnly mode. Answer from local memory only.',
+        });
+      }
+      if (sufficient) {
+        this._decisionTrace.emit({ event: 'tool_fallback_blocked', tool: toolCall.name, reason: 'sufficient_memory' });
+        return JSON.stringify({
+          blocked: true,
+          reason: 'sufficient_memory',
+          tool: toolCall.name,
+          message: 'Network-class tool blocked: local memory was sufficient to answer. Answer from retrieved context.',
+        });
+      }
+      this._decisionTrace.emit({ event: 'tool_fallback_allowed', tool: toolCall.name, reason: 'insufficient_memory' });
+    } else {
+      // Record allowance for non-network tools so the trace is complete.
+      this._decisionTrace.emit({ event: 'tool_fallback_allowed', tool: toolCall.name, reason: 'non_network_tool' });
+    }
     return this.toolRegistry.execute(toolCall.name, toolCall.arguments, {
       sessionId,
       agent: this,

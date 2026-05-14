@@ -289,6 +289,16 @@ export interface AgentConfig {
     entityIndexing?: {
       enabled: boolean;
     };
+    /**
+     * Batch A2 — Private-memory-first enforcement.
+     * When true:
+     *   - Cloud LLM providers (anthropic, openai) refuse to initialise.
+     *   - Network-class tools (web_search, browser_*, etc.) are blocked
+     *     at dispatch time regardless of retrieval sufficiency.
+     *   - Default behaviour is unaffected when false (today's default).
+     * Env override: AGENTX_LOCAL_ONLY=true|false.
+     */
+    localOnly?: boolean;
   };
   providers: {
     anthropic?: { model: string; maxTokens: number };

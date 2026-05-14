@@ -11,6 +11,17 @@ export { resolveOllamaModel } from './resolve-ollama-model.js';
 export type { OllamaModelResolution } from './resolve-ollama-model.js';
 
 export function createProvider(providerName: LLMProvider, config: AgentConfig): BaseLLMProvider {
+  // Batch A2 — Private-memory-first / localOnly enforcement.
+  // When localOnly=true, cloud providers refuse to initialise. The agent
+  // either succeeds with a local provider (ollama) or fails honestly at
+  // construction time. We DO NOT silently substitute providers.
+  if (config.agent.localOnly === true && (providerName === 'anthropic' || providerName === 'openai')) {
+    throw new Error(
+      `localOnly is enabled — refusing to initialise cloud provider "${providerName}". ` +
+      `Set agent.defaultProvider="ollama" or AGENT_DEFAULT_PROVIDER=ollama. ` +
+      `(Set agent.localOnly=false / AGENTX_LOCAL_ONLY=false to permit cloud providers.)`,
+    );
+  }
   switch (providerName) {
     case 'anthropic': {
       const pc = config.providers.anthropic;

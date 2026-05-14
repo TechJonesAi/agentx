@@ -626,7 +626,13 @@ describe('Private-Memory-First E2E (Batch A1)', () => {
     expect(webSearchCalls, 'web_search must not be called when memory is sufficient').toEqual([]);
   }, SLOW);
 
-  it('Test 7b — memory-insufficient query: provider may emit web_search; agent currently dispatches it (gap documented)', async () => {
+  it('Test 7b — memory-insufficient + localOnly=true: web_search BLOCKED via runtime gate (Batch A2 enforced)', async () => {
+    // Batch A2 turned the documented A1 gap into runtime enforcement.
+    // To exercise the gate from inside the harness's pre-built rig, we
+    // flip the agent's localOnly flag at runtime (the gate reads it on
+    // every executeToolCall — no constructor re-run required).
+    (rig.agent as unknown as { _localOnly: boolean })._localOnly = true;
+
     // Register the mock web_search.
     const webSearchCalls: Array<Record<string, unknown>> = [];
     rig.agent.getToolRegistry().register({
@@ -638,46 +644,49 @@ describe('Private-Memory-First E2E (Batch A1)', () => {
       async execute(args) { webSearchCalls.push(args); return JSON.stringify({ blocked: false, hits: [] }); },
     });
 
-    // Force the stub to emit a web_search tool_call when memory is empty.
     installMemoryFaithfulStub(
       rig.agent,
       [BOOK_SENTINEL, UPLOAD_SENTINEL, EMAIL_SENTINEL, OCR_SENTINEL],
       { behaviourOnEmpty: 'web-search-call' },
     );
 
-    // No memory seeded → empty retrieval → stub emits web_search.
     const events = await postChatStream(rig.port, `What is the current price of ${UNKNOWN_PHRASE} shares?`);
-
-    const doneEv = events.find(e => e.type === 'done')!;
-    // Today: the agent dispatches the tool call. Tomorrow (Batch A2):
-    // we add a local-only / sufficiency gate that blocks network-class
-    // tools. This assertion documents TODAY'S behaviour honestly so
-    // the gap can be addressed in the next batch.
-    //
-    // Pass condition (today): tool was dispatched.
-    // Pass condition (after A2 with local-only on): webSearchCalls is [].
-    // We assert: retrieval ran BEFORE the tool call (the ordering fact
-    // is what matters in A1; the blocking decision is A2 scope).
     const retrievalEv = events.find(e => e.type === 'retrieval');
     expect(retrievalEv, 'retrieval must run even when memory is empty').toBeDefined();
     expect(retrievalEv?.__seq).toBe(0);
 
-    // Whether the tool was actually dispatched depends on whether
-    // a gate exists. We do NOT fail here either way — we observe.
-    const gateExists = webSearchCalls.length === 0;
-    if (!gateExists) {
-      // Document the gap in test output. The assertion lets the test
-      // pass on today's main but flags the missing gate.
-      expect(webSearchCalls.length).toBeGreaterThan(0);
-    } else {
-      expect(webSearchCalls).toEqual([]);
-    }
+    // Batch A2 — the gate must have blocked web_search.
+    expect(webSearchCalls, 'web_search must NOT be dispatched under localOnly').toEqual([]);
 
-    // Either way: no external (non-localhost) HTTP from the test
-    // process. (The mock web_search doesn't actually fetch.)
+    // No external (non-localhost) HTTP at all.
     expect(rig.fetchRec.records.filter(r => !isLocalhostUrl(r.url))).toEqual([]);
-    // Provide ordering as a hard fact for downstream batches.
-    expect(String((doneEv as { content?: string }).content ?? '')).toBeDefined();
+
+    // Decision trace must contain the expected events.
+    const trace = rig.agent.getLastDecisionTrace();
+    const names = trace.map(e => e.event);
+    expect(names).toContain('retrieval_started');
+    expect(names).toContain('retrieval_sufficiency_decision');
+    expect(names).toContain('tool_fallback_blocked');
+    expect(names).toContain('external_request_blocked');
+    const blocked = trace.find(e => e.event === 'tool_fallback_blocked') as { reason: string } | undefined;
+    expect(blocked?.reason).toBe('local_only');
+  }, SLOW);
+
+  it('Test 7c — localOnly=true blocks web_search even when retrieval is completely empty', async () => {
+    // No memory at all. Provider emits web_search. localOnly=true.
+    (rig.agent as unknown as { _localOnly: boolean })._localOnly = true;
+    const webSearchCalls: Array<Record<string, unknown>> = [];
+    rig.agent.getToolRegistry().register({
+      definition: { name: 'web_search', description: 'web search',
+        parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+      async execute(a) { webSearchCalls.push(a); return JSON.stringify({}); },
+    });
+    installMemoryFaithfulStub(rig.agent, [BOOK_SENTINEL], { behaviourOnEmpty: 'web-search-call' });
+    await postChatStream(rig.port, 'totally unrelated empty-memory question');
+    expect(webSearchCalls).toEqual([]);
+    const trace = rig.agent.getLastDecisionTrace();
+    const blocked = trace.find(e => e.event === 'tool_fallback_blocked') as { reason: string } | undefined;
+    expect(blocked?.reason).toBe('local_only');
   }, SLOW);
 
   // ── Privacy enforcement ───────────────────────────────────────────

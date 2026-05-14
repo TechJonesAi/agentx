@@ -51,6 +51,22 @@ export { LLMInteractionLogger } from './observability/llm-interaction-logger.js'
 // Tier 2 batch B re-exports — needed by web routes for /api/mcp/* writes.
 // These are route-level config helpers; no MCP runtime instantiation here.
 export { loadMCPConfig, saveMCPConfig, validateServerConfig, DEFAULT_MCP_CONFIG } from './mcp/config.js';
+// Batch A2 — Private-memory-first enforcement public API
+export {
+  assessRetrievalSufficiency,
+  extractQueryTerms,
+  type RetrievalSufficiencyDecision,
+  type RetrievalSufficiencyInput,
+  type RetrievalDocLite,
+} from './reasoning/retrieval-sufficiency.js';
+export {
+  DecisionTraceBuffer,
+  filterEvents,
+  type PrivateMemoryEvent,
+  type PrivateMemoryEventName,
+  type ToolFallbackBlockedEvent,
+  type RetrievalSufficiencyEvent,
+} from './observability/private-memory-events.js';
 export type { MCPConfig, MCPServerConfig } from './mcp/types.js';
 // Tier 3 Builder Batch 2 re-exports — for /api/builder/queue/{cancel,clear}
 // tests that need to construct the manager classes directly.

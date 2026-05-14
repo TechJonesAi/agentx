@@ -164,6 +164,12 @@ export function applyEnvOverrides(config: AgentConfig): AgentConfig {
     if (!config.agent.entityIndexing) config.agent.entityIndexing = { enabled: false };
     config.agent.entityIndexing.enabled = entityEnv;
   }
+  // Batch A2 — Private-memory-first enforcement flag.
+  // AGENTX_LOCAL_ONLY=true → cloud providers + network-class tools rejected.
+  const localOnlyEnv = parseBoolEnv(process.env['AGENTX_LOCAL_ONLY']);
+  if (localOnlyEnv !== undefined) {
+    config.agent.localOnly = localOnlyEnv;
+  }
   return config;
 }
 
