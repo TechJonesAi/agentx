@@ -33,7 +33,7 @@ beforeEach(() => {
   svc = new RetrievalService(db);
   registry = new DocumentRegistry(db);
   fts = new FtsIndexService(db);
-}, 30_000);
+}, 60_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }

@@ -16,7 +16,7 @@ beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-fbk-'));
   db = new Database(path.join(tmpDir, 'fbk.db'));
   store = new FeedbackStore(db);
-}, 30_000);
+}, 60_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }

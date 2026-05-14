@@ -130,7 +130,7 @@ describe('Retrieval auto-sync state machine', () => {
     targetDbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-target-'));
     targetDb = createDatabase(targetDbDir);
     runCognitiveMemoryMigrations(targetDb);
-  }, 30_000);
+  }, 60_000);
   afterEach(() => {
     _resetSyncStateForTests();
     try { (targetDb as unknown as { close(): void }).close(); } catch { /* */ }

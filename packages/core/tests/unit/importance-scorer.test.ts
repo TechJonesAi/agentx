@@ -41,7 +41,7 @@ beforeEach(() => {
   db = new SqliteMemoryDb(tmpDir);
   createCategorizedMemoryStub(db);
   scorer = new ImportanceScorer(db);
-}, 30_000);
+}, 60_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }

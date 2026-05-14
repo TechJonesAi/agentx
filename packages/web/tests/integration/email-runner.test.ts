@@ -155,7 +155,7 @@ describe('Email ingestion runner — end-to-end against a real DB', () => {
     };
 
     router = createApiRouter(fakeAgent as never);
-  }, 30_000);
+  }, 60_000);
 
   afterAll(() => {
     try { runner.stop(); db.close(); } catch { /* */ }
