@@ -26,12 +26,17 @@ let tmpDir: string;
 let dbFile: string;
 let db: Database.Database;
 
+// Hook timeout: 60s. Round-3 set this to 30s and it held on
+// most Windows runners, but slow-runner contention can push the FTS5
+// contentless migration loop past 30s. 60s matches the harness's SLOW
+// budget and gives this hook enough headroom for the most-loaded
+// GitHub-hosted Windows runner observed so far (CI run 25846282745).
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentx-r5.5-'));
   dbFile = path.join(tmpDir, 'cog.db');
   db = new Database(dbFile);
   runCognitiveMemoryMigrations(db);
-}, 30_000);
+}, 60_000);
 
 afterEach(() => {
   try { db.close(); } catch { /* ignore */ }
