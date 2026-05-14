@@ -483,7 +483,11 @@ function agentDb(agent: Agent): Database.Database {
 // Tests
 // ────────────────────────────────────────────────────────────────────────
 
-const SLOW = 60_000;
+// 60s held for the harness rig setup (Agent + migrations + in-process
+// HTTP server) on most Windows runners. CI run 25875431773 had a
+// windows-18 runner exceed 60s on the rig boot under contention.
+// Bumped to 120s to match retrieval-routing's outlier-runner ceiling.
+const SLOW = 120_000;
 
 describe('Private-Memory-First E2E (Batch A1)', () => {
   let rig: TestRig;
