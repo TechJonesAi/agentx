@@ -52,13 +52,20 @@ beforeEach(() => {
   process.env['DATA_DIR'] = tmpDir;
 }, 60_000);
 
-afterEach(() => {
-  // Close every Agent + DB we built this test so Windows can unlink the
-  // tmp dir. better-sqlite3 holds the .db file open until close(); on
-  // Windows fs.rmSync throws EBUSY if any handle is still alive.
+afterEach(async () => {
+  // Settle delay: chat() queues several fire-and-forget tasks (audit
+  // log, session store flush, conversation memory writes) that touch
+  // the DB. We need to let those drain before calling shutdown(),
+  // otherwise their tail-end callbacks fire against a closed DB and
+  // produce "The database connection is not open" unhandled rejections.
+  await new Promise((r) => setTimeout(r, 100));
+  // Await proper agent shutdown sequentially. agent.shutdown() closes
+  // the DB internally; don't call db.close() again.
   for (const a of agentsBuilt) {
-    try { (a as unknown as { shutdown?: () => Promise<void> }).shutdown?.(); } catch { /* */ }
-    try { (a as unknown as { db?: { close?: () => void } }).db?.close?.(); } catch { /* */ }
+    try {
+      const sd = (a as unknown as { shutdown?: () => Promise<void> | void }).shutdown;
+      if (typeof sd === 'function') await Promise.resolve(sd.call(a));
+    } catch { /* */ }
   }
   agentsBuilt.length = 0;
   fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
