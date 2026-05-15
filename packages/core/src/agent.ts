@@ -131,7 +131,72 @@ Always start by running:
 unix timestamp in milliseconds. Then put every subsequent shell command
 INSIDE that directory (use the workingDir argument of the shell tool OR
 absolute paths). NEVER write app files into the AgentX project root or
-the user's home directory directly. NEVER mix files for different apps.`;
+the user's home directory directly. NEVER mix files for different apps.
+
+CRITICAL — Editing existing files (preserve content):
+When you modify an EXISTING file that the user already has, NEVER use
+\`echo "..." > file\` to overwrite the whole file unless you are emitting
+the COMPLETE updated content including every previously-existing function,
+event handler, import, and behaviour. A file rewrite that drops existing
+functionality (e.g. re-emitting only the data array and forgetting the
+render function) is a failure. Prefer:
+  - Surgical edits with \`sed -i '' 's/OLD/NEW/g' file\` for small changes
+  - \`cat file\` first to read existing content, then emit the FULL merged
+    content in one \`echo > file\` (or use a heredoc) — keep every existing
+    function, event handler, import, helper, and behaviour intact
+  - Append-only edits with \`echo "..." >> file\` for additions
+When generating HTML pages that load JS via <script src=...>, verify that
+the corresponding JS file defines the functions referenced in inline
+event handlers, window.onload, and \`document.querySelector(...).onclick\`
+sites. If you produce a page that calls \`displayX()\` but the JS file
+contains only a data array, the page will not work.
+
+CRITICAL — Use the write_file tool for ALL file content:
+For ANY file that contains HTML, CSS, JS, JSON, Markdown, or any text
+longer than a single short line, ALWAYS use the \`write_file\` tool
+(args: {path, content}) instead of \`echo > file\` from the shell. The
+write_file tool takes raw UTF-8 content — no shell escaping required.
+Use the shell tool ONLY for: mkdir, ls, wc, cat, sed, mv, cp, grep,
+chmod, and verifying file sizes. Pattern when scaffolding an app:
+  Call 1 — shell: mkdir -p /Users/darrenjones/Projects/AGENTX_APPS/build-<ts>-<slug>
+  Call 2 — write_file: {path:"/Users/.../index.html", content:"<!doctype html>..."}
+  Call 3 — write_file: {path:"/Users/.../style.css", content:"body{...}"}
+  Call 4 — write_file: {path:"/Users/.../script.js", content:"const profiles=[...]"}
+  Call 5 — shell: wc -c /Users/.../index.html /Users/.../style.css /Users/.../script.js
+Each write_file call returns the byte count — verify it is non-zero.
+
+LEGACY — If you must write content via the shell tool:
+The AgentX shell sandbox does NOT provide interactive stdin. NEVER use
+\`cat > file\` or \`cat << EOF\` / heredocs — those commands will hang
+waiting for stdin and produce a 0-byte file. ALWAYS write file content
+using one of:
+  - \`echo '<full content>' > file\` (single quotes, one command line,
+    use \\n for newlines or \`printf\` if multiline is needed)
+  - \`printf '%s' '<full content>' > file\`
+  - For HTML/JS/CSS containing single quotes: use \`echo "..."\` with
+    double quotes and escape any \\$ and \\\` characters.
+After writing any file, ALWAYS verify it is non-empty with
+\`wc -c filename\` before moving to the next file. A 0-byte file means
+the write failed and you must rewrite it.
+
+NEVER emit a \`printf\` or \`echo\` without explicit \`> filename\`
+redirection at the end of the same shell command — output to stdout
+creates NO file.
+
+CRITICAL — One file per shell call (for build/generate workflows):
+Issue ONE shell tool call per file. Do NOT chain
+\`mkdir && echo ... > a.html && echo ... > b.css\` in a single command:
+shell argument size and quote-escaping fail for non-trivial HTML/JS.
+Pattern when scaffolding an app under AGENTX_APPS:
+  Call 1 — shell: mkdir -p /Users/darrenjones/Projects/AGENTX_APPS/build-<ts>-<slug>
+  Call 2 — shell: echo '<full index.html>' > /absolute/.../index.html
+  Call 3 — shell: wc -c /absolute/.../index.html
+  Call 4 — shell: echo '<full style.css>' > /absolute/.../style.css
+  Call 5 — shell: wc -c /absolute/.../style.css
+  Call 6 — shell: echo '<full script.js>' > /absolute/.../script.js
+  Call 7 — shell: wc -c /absolute/.../script.js
+Always use absolute paths in every command so the working directory
+doesn't matter.`;
 
 export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private config: AgentConfig;

@@ -1,5 +1,81 @@
 import type { Tool } from '../types.js';
 import { ShellSandbox } from '../security/sandbox.js';
+import { writeFile, mkdir, stat } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+
+// ─── Write File Tool ─────────────────────────────────────────────────────────
+// Dedicated tool for writing file contents without shell-escaping pitfalls.
+// Constrained to the AGENTX_APPS workspace and a small set of safe roots.
+
+const WRITE_FILE_ALLOWED_ROOTS = [
+  '/Users/darrenjones/Projects/AGENTX_APPS',
+  '/tmp',
+  '/var/folders',
+];
+
+function isPathAllowed(absPath: string): boolean {
+  const resolved = resolve(absPath);
+  return WRITE_FILE_ALLOWED_ROOTS.some((root) =>
+    resolved === root || resolved.startsWith(root + '/'),
+  );
+}
+
+export const writeFileTool: Tool = {
+  definition: {
+    name: 'write_file',
+    description:
+      'Write a file to disk with full content. Use this for any file >50 bytes ' +
+      '(HTML/CSS/JS/JSON/MD) instead of `echo > file`. Creates parent directories ' +
+      'automatically. Restricted to /Users/darrenjones/Projects/AGENTX_APPS/, /tmp, ' +
+      'and /var/folders. Returns the byte count on success.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description:
+            'Absolute file path. MUST start with /Users/darrenjones/Projects/AGENTX_APPS/ ' +
+            'for app builds. Parent directories are created automatically.',
+        },
+        content: {
+          type: 'string',
+          description:
+            'Full file content as a UTF-8 string. No shell escaping needed — pass ' +
+            'the raw HTML/CSS/JS/text exactly as it should appear in the file.',
+        },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  async execute(args) {
+    const filePath = args['path'] as string;
+    const content = args['content'] as string;
+
+    if (!filePath || typeof filePath !== 'string') {
+      return '[write_file error]: path is required and must be a string';
+    }
+    if (typeof content !== 'string') {
+      return '[write_file error]: content is required and must be a string';
+    }
+    if (!filePath.startsWith('/')) {
+      return `[write_file error]: path must be absolute, got: ${filePath}`;
+    }
+    if (!isPathAllowed(filePath)) {
+      return `[write_file error]: path '${filePath}' is outside allowed roots ` +
+        `(${WRITE_FILE_ALLOWED_ROOTS.join(', ')})`;
+    }
+
+    try {
+      await mkdir(dirname(filePath), { recursive: true });
+      await writeFile(filePath, content, 'utf-8');
+      const st = await stat(filePath);
+      return `[write_file ok]: wrote ${st.size} bytes to ${filePath}`;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return `[write_file error]: ${msg}`;
+    }
+  },
+};
 
 // ─── Shell Tool (sandboxed) ──────────────────────────────────────────────────
 
@@ -126,5 +202,5 @@ export const currentTimeTool: Tool = {
 };
 
 export function getBuiltinTools(): Tool[] {
-  return [shellTool, memoryStoreTool, memorySearchTool, currentTimeTool];
+  return [shellTool, writeFileTool, memoryStoreTool, memorySearchTool, currentTimeTool];
 }
