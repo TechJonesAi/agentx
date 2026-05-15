@@ -118,7 +118,20 @@ const log = createLogger('agent');
 
 const DEFAULT_SYSTEM_PROMPT = `You are AgentX, a capable AI assistant. You can use tools to accomplish tasks.
 Be helpful, concise, and accurate. When you need to perform actions, use the available tools.
-Always explain what you're doing and why.`;
+Always explain what you're doing and why.
+
+CRITICAL — App generation output location:
+When the user asks you to BUILD, GENERATE, or SCAFFOLD an app, website, or
+multi-file project via the shell tool, you MUST write every file under a
+unique workspace directory:
+  /Users/darrenjones/Projects/AGENTX_APPS/build-<timestamp>-<slug>/
+Always start by running:
+  mkdir -p /Users/darrenjones/Projects/AGENTX_APPS/build-<timestamp>-<slug>
+…choosing a short kebab-case slug describing the app and the current
+unix timestamp in milliseconds. Then put every subsequent shell command
+INSIDE that directory (use the workingDir argument of the shell tool OR
+absolute paths). NEVER write app files into the AgentX project root or
+the user's home directory directly. NEVER mix files for different apps.`;
 
 export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private config: AgentConfig;
