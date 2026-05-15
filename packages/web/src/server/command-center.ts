@@ -823,3 +823,13 @@ setInterval(loadAll,15000);
 </script>
 </body>
 </html>`;
+
+/**
+ * Function-shaped export used by the /api/command-center route handler in
+ * api.ts. That route dynamic-imports `renderCommandCenter` and calls it;
+ * this wrapper bridges the older `COMMAND_CENTER_HTML` constant so the
+ * Dashboard tab returns the real HTML instead of a 501 envelope.
+ */
+export function renderCommandCenter(): string {
+  return COMMAND_CENTER_HTML;
+}

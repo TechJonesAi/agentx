@@ -735,8 +735,14 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
         if (route === '/api/logs/system' && method === 'GET') {
           try {
-            const buf = (agent as unknown as { getSystemLogBuffer?: () => { recent(n?: number): unknown } }).getSystemLogBuffer?.();
-            const entries = buf?.recent(500) ?? [];
+            // SystemLogBuffer exposes list({limit, level, module, search}).
+            // The previous call to .recent(500) referenced a method that
+            // doesn't exist and returned a TypeError to the Logs tab.
+            const buf = (agent as unknown as { getSystemLogBuffer?: () => { list(opts?: { limit?: number; level?: string; module?: string; search?: string }): unknown[] } }).getSystemLogBuffer?.();
+            const u = new URL(url, 'http://x');
+            const limitParam = Number(u.searchParams.get('limit') ?? '500');
+            const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(2000, Math.floor(limitParam)) : 500;
+            const entries = buf?.list({ limit }) ?? [];
             sendJson(res, 200, { entries });
           } catch (e) {
             sendJson(res, 200, { entries: [], error: String(e) });

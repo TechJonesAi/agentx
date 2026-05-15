@@ -1073,3 +1073,13 @@ export function getDevicePermissionCenterHTML(): string {
 </body>
 </html>`;
 }
+
+/**
+ * Function-shaped export used by the /api/device/permission-center route
+ * handler in api.ts. That route dynamic-imports `renderDevicePermissionCenter`
+ * and calls it; this wrapper bridges the older `getDevicePermissionCenterHTML`
+ * function name so the Tools tab's iframe loads real HTML.
+ */
+export function renderDevicePermissionCenter(): string {
+  return getDevicePermissionCenterHTML();
+}
