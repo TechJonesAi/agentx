@@ -708,13 +708,22 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         return `\n\n--- Retrieved Facts (sql:documents) ---\nDOCUMENT COUNT (${filterDesc}): ${retrievalCount}\nThis count is authoritative — it was computed from SQL, not estimated.\n--- End Retrieved Facts ---`;
       }
       if (documents.length === 0) return null;
-      const lines = documents.slice(0, 50).map(d =>
-        `- [${d.document_id}] ${d.file_name}${d.title ? ` — ${d.title}` : ''}${d.sender ? ` (sender: ${d.sender})` : ''}`
-      );
+      // Phase 3 audit fix — include the snippet content directly in the
+      // injected block. Previously only doc id + filename were surfaced,
+      // forcing the LLM to either hallucinate or attempt a `memory_search`
+      // tool (which is a stub). With chunk content in-prompt the LLM can
+      // ground its answer in real retrieved evidence. Snippets are bounded
+      // (~280 chars each from extractSnippet) so the block stays small.
+      const lines = documents.slice(0, 50).map(d => {
+        const head = `- [${d.document_id}] ${d.file_name}${d.title ? ` — ${d.title}` : ''}${d.sender ? ` (sender: ${d.sender})` : ''}`;
+        return d.snippet
+          ? `${head}\n  excerpt: ${String(d.snippet).replace(/\s+/g, ' ').trim()}`
+          : head;
+      });
       const intentLabel = r.intent === 'EXACT_SEARCH' ? 'Exact-match Documents' :
                           r.intent === 'SEMANTIC' ? 'Semantically-relevant Documents' :
                           r.intent === 'FILTERED_SEARCH' ? 'Filtered Documents' : 'Documents';
-      return `\n\n--- Retrieved Knowledge (${intentLabel}, ${r.results.length} matches) ---\n${lines.join('\n')}\n--- End Retrieved Knowledge ---`;
+      return `\n\n--- Retrieved Knowledge (${intentLabel}, ${r.results.length} matches) ---\n${lines.join('\n')}\n\nWhen answering, prefer information from the excerpts above over general knowledge. Cite the document by [document_id] when you use it.\n--- End Retrieved Knowledge ---`;
     } catch (error) {
       // R10: retrieval failure must NEVER crash chat. Log a safe warning
       // (no stack trace dump that might include user data), record the

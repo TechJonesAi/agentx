@@ -262,6 +262,20 @@ export class OllamaProvider extends BaseLLMProvider {
       }));
     }
 
+    // Fallback: some Ollama models (qwen2.5-coder, llama 3, etc.) emit
+    // tool calls as JSON-in-content during streaming instead of via the
+    // native `tool_calls` field. The non-streaming path already handles
+    // this via parseToolCalls(); replicate that for the streaming path
+    // so the agent's dispatch loop actually fires when the model wants
+    // a tool.
+    if (toolsEnabled && toolCalls.length === 0 && content.trim().length > 0) {
+      const extracted = this.extractToolCallsFromContent(content.trim(), 0);
+      if (extracted.length > 0) {
+        toolCalls = extracted;
+        log.debug({ count: toolCalls.length, format: 'json-in-content-stream' }, 'Parsed streaming tool calls from content');
+      }
+    }
+
     const result: LLMResponse = {
       content: toolCalls.length > 0 ? '' : content,
       finishReason: toolCalls.length > 0 ? 'tool_use' : 'stop',
