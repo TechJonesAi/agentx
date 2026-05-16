@@ -3,6 +3,8 @@ import { ChatSessions } from '../components/panels/ChatSessions';
 import { ProjectWorkflow } from '../components/panels/ProjectWorkflow';
 import { ActivityFeed } from '../components/panels/ActivityFeed';
 import { ActiveLLMRouting } from '../components/panels/ActiveLLMRouting';
+import { SelfHealing } from '../components/panels/SelfHealing';
+import { SelfLearning } from '../components/panels/SelfLearning';
 import { QuickActions, type QuickAction } from '../components/QuickActions';
 import '../styles/Dashboard.css';
 
@@ -91,6 +93,11 @@ export function Dashboard() {
         <div className="grid grid-cols-2">
           <ActivityFeed isLoading={isLoading} />
           <ActiveLLMRouting />
+        </div>
+
+        <div className="grid grid-cols-2">
+          <SelfHealing />
+          <SelfLearning />
         </div>
       </div>
     </div>

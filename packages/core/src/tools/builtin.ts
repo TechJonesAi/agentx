@@ -136,54 +136,94 @@ export const shellTool: Tool = {
 };
 
 // ─── Memory Tools ────────────────────────────────────────────────────────────
+// Both tools now execute REAL reads/writes against the agent's
+// LongTermMemoryStore. Previously they returned an opaque JSON echo with
+// `action: 'search'` — the LLM couldn't actually retrieve anything.
 
 export const memoryStoreTool: Tool = {
   definition: {
     name: 'memory_store',
-    description: 'Store information in long-term memory for later retrieval',
+    description: 'Store a piece of information in long-term memory for later retrieval. Returns the memory id.',
     parameters: {
       type: 'object',
       properties: {
-        content: {
-          type: 'string',
-          description: 'The content to remember',
-        },
+        content: { type: 'string', description: 'The content to remember' },
         tags: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Tags to categorize this memory',
+          description: 'Optional tags to categorize this memory (e.g. ["preference", "user"])',
         },
       },
       required: ['content'],
     },
   },
-  async execute(args) {
-    return JSON.stringify({ action: 'store', content: args['content'], tags: args['tags'] ?? [] });
+  async execute(args, context) {
+    const content = String(args['content'] ?? '').trim();
+    const tags = Array.isArray(args['tags']) ? (args['tags'] as unknown[]).filter((t) => typeof t === 'string') as string[] : [];
+    if (!content) return '[memory_store error]: content is required';
+    try {
+      const store = (context.agent as unknown as { getLongTermMemory?: () => { store(c: string, t?: string[]): string } }).getLongTermMemory?.();
+      if (!store) return '[memory_store error]: long-term memory not available';
+      const id = store.store(content, tags);
+      return `[memory_store ok]: stored as ${id} (tags: ${tags.length > 0 ? tags.join(', ') : 'none'})`;
+    } catch (e) {
+      return `[memory_store error]: ${e instanceof Error ? e.message : String(e)}`;
+    }
   },
 };
 
 export const memorySearchTool: Tool = {
   definition: {
     name: 'memory_search',
-    description: 'Search long-term memory for previously stored information',
+    description: 'Search long-term memory by content substring and/or tags. Returns matching memories with their ids.',
     parameters: {
       type: 'object',
       properties: {
-        query: {
-          type: 'string',
-          description: 'Search query',
-        },
+        query: { type: 'string', description: 'Content substring to search for (case-insensitive)' },
         tags: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Filter by tags',
+          description: 'Optional tag filter — at least one tag must match',
         },
+        limit: { type: 'number', description: 'Max results to return (default 5, max 20)' },
       },
       required: ['query'],
     },
   },
-  async execute(args) {
-    return JSON.stringify({ action: 'search', query: args['query'], tags: args['tags'] ?? [] });
+  async execute(args, context) {
+    const query = String(args['query'] ?? '').trim();
+    const tagsRaw = args['tags'];
+    const tags = Array.isArray(tagsRaw) ? (tagsRaw as unknown[]).filter((t) => typeof t === 'string') as string[] : [];
+    const limit = Math.max(1, Math.min(20, Number(args['limit'] ?? 5)));
+    try {
+      const store = (context.agent as unknown as {
+        getLongTermMemory?: () => {
+          searchByContent(q: string, n?: number): Array<{ id: string; content: string; tags: string[] }>;
+          searchByTags(t: string[], n?: number): Array<{ id: string; content: string; tags: string[] }>;
+        };
+      }).getLongTermMemory?.();
+      if (!store) return '[memory_search error]: long-term memory not available';
+      let results: Array<{ id: string; content: string; tags: string[] }> = [];
+      if (query) {
+        results = store.searchByContent(query, limit);
+      }
+      if (tags.length > 0) {
+        const byTags = store.searchByTags(tags, limit);
+        // Merge unique by id, preserving order
+        const seen = new Set(results.map((r) => r.id));
+        for (const r of byTags) {
+          if (!seen.has(r.id)) { results.push(r); seen.add(r.id); }
+        }
+        results = results.slice(0, limit);
+      }
+      if (results.length === 0) {
+        return `[memory_search]: no matches for query='${query}' tags=[${tags.join(', ')}]`;
+      }
+      const lines = results.map((r, i) => `${i + 1}. [${r.id.slice(0, 8)}] (tags: ${r.tags.join(', ') || 'none'}) ${r.content.slice(0, 200)}`);
+      return `[memory_search]: ${results.length} match(es)\n${lines.join('\n')}`;
+    } catch (e) {
+      return `[memory_search error]: ${e instanceof Error ? e.message : String(e)}`;
+    }
   },
 };
 

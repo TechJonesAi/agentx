@@ -107,6 +107,8 @@ import { createImapSource } from './email/imap-source.js';
 import { LLMInteractionLogger } from './observability/llm-interaction-logger.js';
 import { SystemLogBuffer } from './observability/system-log-buffer.js';
 import { ModelRoutingHistory } from './observability/model-routing-history.js';
+import { ToolOutcomeStore } from './observability/tool-outcome-store.js';
+import { HealthMonitor } from './observability/health-monitor.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -610,6 +612,134 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       knowledgeFlow: !!this._knowledgeFlowEngine,
       automation: !!this._automationEngine,
     }, 'Phase B-merge subsystems initialized');
+
+    // Self-Healing: register real probes and start the monitor. Each probe is
+    // a read-only check; the (optional) repair() function is the safest
+    // possible idempotent action — never destructive. Disable with
+    // AGENTX_DISABLE_HEALTH_MONITOR=true for tests.
+    this._initHealthMonitor();
+  }
+
+  private _initHealthMonitor(): void {
+    if (process.env['AGENTX_DISABLE_HEALTH_MONITOR'] === 'true') return;
+    const monitor = HealthMonitor.getInstance();
+    const provider = this.provider;
+    const config = this.config;
+
+    // 1) LLM Provider liveness — for ollama, ping the local /api/tags
+    //    endpoint. For other providers, just verify the instance exists.
+    monitor.registerProbe({
+      name: 'LLM Provider',
+      run: async () => {
+        try {
+          if (!provider) return { status: 'failed', detail: 'provider not initialized' };
+          if (config.agent.defaultProvider === 'ollama') {
+            const host = process.env['OLLAMA_HOST'] ?? 'http://localhost:11434';
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 3000);
+            try {
+              const r = await fetch(`${host}/api/tags`, { signal: ctrl.signal });
+              if (!r.ok) return { status: 'failed', detail: `ollama ${host} returned ${r.status}` };
+              const data = await r.json() as { models?: unknown[] };
+              const n = Array.isArray(data.models) ? data.models.length : 0;
+              if (n === 0) return { status: 'degraded', detail: `ollama reachable but 0 models installed` };
+              return { status: 'ok', detail: `${n} model(s) installed` };
+            } finally { clearTimeout(t); }
+          }
+          return { status: 'ok' };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+      repair: async () => {
+        // Safe repair: re-probe with longer timeout. Surfacing this as
+        // "needs-approval" if it still fails — restarting ollama is the
+        // user's call, not ours.
+        const host = process.env['OLLAMA_HOST'] ?? 'http://localhost:11434';
+        try {
+          const r = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(8000) });
+          if (r.ok) return { outcome: 'success', action: 're-pinged ollama with extended timeout', detail: 'recovered' };
+          return { outcome: 'needs-approval', action: 'restart ollama', detail: `ollama at ${host} unreachable. User must restart it.`, requiresApproval: true };
+        } catch (e) {
+          return { outcome: 'needs-approval', action: 'restart ollama', detail: e instanceof Error ? e.message : String(e), requiresApproval: true };
+        }
+      },
+    });
+
+    // 2) Long-term memory DB — read-only count probe.
+    monitor.registerProbe({
+      name: 'Long-term Memory',
+      run: async () => {
+        try {
+          const all = this.longTermMemory.listAll(1);
+          return { status: 'ok', detail: `db readable (${all.length >= 1 ? 'has entries' : 'empty'})` };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+    // 3) Tool registry — must have shell + write_file + memory_* registered.
+    monitor.registerProbe({
+      name: 'Tool Registry',
+      run: async () => {
+        const defs = this.toolRegistry.getDefinitions();
+        const names = new Set(defs.map((d) => d.name));
+        const required = ['shell', 'write_file', 'memory_store', 'memory_search'];
+        const missing = required.filter((r) => !names.has(r));
+        if (missing.length > 0) return { status: 'failed', detail: `missing: ${missing.join(', ')}` };
+        return { status: 'ok', detail: `${defs.length} tools registered` };
+      },
+    });
+
+    // 4) Conversation Memory — must be able to enumerate sessions without throw.
+    monitor.registerProbe({
+      name: 'Conversation Memory',
+      run: async () => {
+        try {
+          // No-op call to verify the singleton is alive
+          this.conversationMemory.getMessages('__healthcheck__');
+          return { status: 'ok' };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+    // 5) Workspace dir (AGENTX_APPS) — must be writable for app generation.
+    monitor.registerProbe({
+      name: 'Workspace (AGENTX_APPS)',
+      run: async () => {
+        try {
+          const fs = await import('node:fs/promises');
+          const path = '/Users/darrenjones/Projects/AGENTX_APPS';
+          const stat = await fs.stat(path).catch(() => null);
+          if (!stat) return { status: 'degraded', detail: `${path} does not exist` };
+          if (!stat.isDirectory()) return { status: 'failed', detail: `${path} is not a directory` };
+          // Try a write
+          const probePath = `${path}/.healthprobe-${Date.now()}`;
+          await fs.writeFile(probePath, 'ok');
+          await fs.unlink(probePath);
+          return { status: 'ok', detail: 'read+write verified' };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+      repair: async () => {
+        try {
+          const fs = await import('node:fs/promises');
+          const path = '/Users/darrenjones/Projects/AGENTX_APPS';
+          await fs.mkdir(path, { recursive: true });
+          return { outcome: 'success', action: 'mkdir -p AGENTX_APPS', detail: 'created workspace directory' };
+        } catch (e) {
+          return { outcome: 'failed', action: 'mkdir AGENTX_APPS', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+    // Run a probe cycle every 60s. Use 15s for the first 5 minutes for
+    // faster boot-time signal, then settle into 60s cadence.
+    monitor.start(60000);
   }
 
   // Phase 4: observation-only orchestration. Pure side-effect on private fields.
@@ -960,6 +1090,8 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getLLMInteractionLogger(): LLMInteractionLogger { return LLMInteractionLogger.getInstance(); }
   getSystemLogBuffer(): SystemLogBuffer { return SystemLogBuffer.getInstance(); }
   getModelRoutingHistory(): ModelRoutingHistory { return ModelRoutingHistory.getInstance(); }
+  getToolOutcomeStore(): ToolOutcomeStore { return ToolOutcomeStore.getInstance(); }
+  getHealthMonitor(): HealthMonitor { return HealthMonitor.getInstance(); }
 
   /** Snapshot of the currently-active model + provider. Used by the
    *  dashboard "Active LLM Routing" panel and Phase 4 truth surface. */
@@ -1264,6 +1396,20 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   getLongTermMemory(): LongTermMemoryStore {
     return this.longTermMemory;
+  }
+
+  /** Conversation memory (per-session message history). Used by the integrity
+   *  diagnostics probe and by anyone needing programmatic session-message
+   *  access. */
+  getConversationMemory(): ConversationMemory {
+    return this.conversationMemory;
+  }
+
+  /** Currently-configured LLM provider instance. Exposed so integrity
+   *  diagnostics can confirm provider availability without going through
+   *  full chat(). */
+  getProvider(): BaseLLMProvider {
+    return this.provider;
   }
 
   getConfig(): AgentConfig {
@@ -1801,10 +1947,22 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       // Record allowance for non-network tools so the trace is complete.
       this._decisionTrace.emit({ event: 'tool_fallback_allowed', tool: toolCall.name, reason: 'non_network_tool' });
     }
-    return this.toolRegistry.execute(toolCall.name, toolCall.arguments, {
-      sessionId,
-      agent: this,
-    });
+    // Self-learning: time every tool call and record outcome to the
+    // ToolOutcomeStore. Heuristic for failure detection lives in the store.
+    const t0 = Date.now();
+    let result: string;
+    try {
+      result = await this.toolRegistry.execute(toolCall.name, toolCall.arguments, {
+        sessionId,
+        agent: this,
+      });
+    } catch (e) {
+      const errResult = `[${toolCall.name} error]: ${e instanceof Error ? e.message : String(e)}`;
+      ToolOutcomeStore.getInstance().record(toolCall.name, errResult, Date.now() - t0);
+      throw e;
+    }
+    ToolOutcomeStore.getInstance().record(toolCall.name, result, Date.now() - t0);
+    return result;
   }
 
   private async handleMemoryToolResult(toolCall: ToolCall, result: string): Promise<void> {

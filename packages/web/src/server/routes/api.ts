@@ -652,6 +652,111 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
 
         // ─── Skills ─────────────────────────────────────────────────────
+        // ─── Self-Healing — real health monitor surfaces ────────────────
+        // Returns live HealthMonitor snapshot: overall status, per-subsystem
+        // last check, success/failure tallies, recent checks, repair journal.
+        if (route === '/api/health/status' && method === 'GET') {
+          try {
+            const m = (agent as unknown as { getHealthMonitor?: () => { snapshot(): unknown } }).getHealthMonitor?.();
+            sendJson(res, 200, m?.snapshot?.() ?? { available: false, reason: 'HealthMonitor not initialized' });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        // Force an immediate probe cycle. Returns the just-run checks.
+        if (route === '/api/health/run' && method === 'POST') {
+          try {
+            const m = (agent as unknown as { getHealthMonitor?: () => { runAll(): Promise<unknown[]> } }).getHealthMonitor?.();
+            const checks = (await m?.runAll?.()) ?? [];
+            sendJson(res, 200, { ok: true, checks });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // ─── Self-Learning — tool reliability + recent outcomes ─────────
+        if (route === '/api/learning/tool-outcomes' && method === 'GET') {
+          try {
+            const s = (agent as unknown as { getToolOutcomeStore?: () => { recent(n?: number): unknown[]; reliability(): unknown[]; size(): number } }).getToolOutcomeStore?.();
+            sendJson(res, 200, {
+              available: !!s,
+              size: s?.size?.() ?? 0,
+              reliability: s?.reliability?.() ?? [],
+              recent: s?.recent?.(100) ?? [],
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        // User-facing reset of learning data. Honest, destructive only of
+        // the in-memory store; we never silently clear DB.
+        if (route === '/api/learning/tool-outcomes' && method === 'DELETE') {
+          try {
+            const s = (agent as unknown as { getToolOutcomeStore?: () => { clear(): void } }).getToolOutcomeStore?.();
+            s?.clear?.();
+            sendJson(res, 200, { ok: true, cleared: true });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // ─── Validation — smoke probe of core surfaces ───────────────────
+        // Real, non-fake. Verifies each registered tool can be looked up
+        // and that core getters return non-null. NOT a full scenario suite
+        // (that comes in Batch 3) — but truthful enough to deserve the UI.
+        if (route === '/api/validation/run' && method === 'POST') {
+          try {
+            type Probe = { name: string; pass: boolean; detail?: string };
+            const probes: Probe[] = [];
+            const reg = agent.getToolRegistry();
+            const defs = reg.getDefinitions();
+            probes.push({ name: 'Tool registry has shell', pass: defs.some((d) => d.name === 'shell') });
+            probes.push({ name: 'Tool registry has write_file', pass: defs.some((d) => d.name === 'write_file') });
+            probes.push({ name: 'Tool registry has memory_store', pass: defs.some((d) => d.name === 'memory_store') });
+            probes.push({ name: 'Tool registry has memory_search', pass: defs.some((d) => d.name === 'memory_search') });
+
+            const cfg = agent.getConfig();
+            probes.push({ name: 'Config has agent name', pass: !!cfg.agent?.name });
+            probes.push({ name: 'Config has default provider', pass: !!cfg.agent?.defaultProvider });
+
+            const a = agent as unknown as Record<string, () => unknown>;
+            probes.push({ name: 'getLongTermMemory() returns instance', pass: !!a['getLongTermMemory']?.() });
+            probes.push({ name: 'getConversationMemory() returns instance', pass: !!a['getConversationMemory']?.() });
+            probes.push({ name: 'getProvider() returns instance', pass: !!a['getProvider']?.() });
+            probes.push({ name: 'getSessionManager() returns instance', pass: !!a['getSessionManager']?.() });
+            probes.push({ name: 'getHealthMonitor() returns instance', pass: !!a['getHealthMonitor']?.() });
+            probes.push({ name: 'getToolOutcomeStore() returns instance', pass: !!a['getToolOutcomeStore']?.() });
+            probes.push({ name: 'getModelRoutingHistory() returns instance', pass: !!a['getModelRoutingHistory']?.() });
+
+            // memory_store + memory_search round-trip on a sentinel value
+            try {
+              const store = a['getLongTermMemory']?.() as { store(c: string, t?: string[]): string; searchByContent(q: string, n?: number): unknown[] } | undefined;
+              const sentinel = `__validation_probe_${Date.now()}`;
+              const id = store?.store?.(sentinel, ['validation-probe']) ?? '';
+              const hits = (store?.searchByContent?.(sentinel, 5) ?? []) as Array<{ id: string }>;
+              probes.push({ name: 'Long-term memory write+read round-trip', pass: hits.some((h) => h.id === id) });
+            } catch (e) {
+              probes.push({ name: 'Long-term memory write+read round-trip', pass: false, detail: e instanceof Error ? e.message : String(e) });
+            }
+
+            const passCount = probes.filter((p) => p.pass).length;
+            sendJson(res, 200, {
+              ok: passCount === probes.length,
+              ranAt: new Date().toISOString(),
+              passCount,
+              totalCount: probes.length,
+              probes,
+            });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // ─── Phase 4 — Active LLM Routing (truth surface) ───────────────
         // Real backend, no fake numbers. /api/models/active returns the
         // current provider+model snapshot; /api/models/routing/history
