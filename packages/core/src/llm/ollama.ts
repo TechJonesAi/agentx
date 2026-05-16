@@ -109,15 +109,18 @@ export class OllamaProvider extends BaseLLMProvider {
   async complete(options: LLMRequestOptions): Promise<LLMResponse> {
     const toolsEnabled = isToolCallingEnabled();
     const messages = this.convertMessages(options.messages, options.systemPrompt, toolsEnabled);
+    // Batch 3: per-call model override. Thread-safe — no provider state mutated.
+    const activeModel = options.model && options.model.trim().length > 0 ? options.model : this.model;
 
     log.debug({
-      messageCount: messages.length, model: this.model, toolsEnabled,
+      messageCount: messages.length, model: activeModel, toolsEnabled,
+      overridden: activeModel !== this.model,
     }, 'Sending request to Ollama');
 
     const tools = toolsEnabled ? this.convertTools(options.tools) : [];
 
     const body: Record<string, unknown> = {
-      model: this.model,
+      model: activeModel,
       messages,
       stream: false,
     };
@@ -186,15 +189,18 @@ export class OllamaProvider extends BaseLLMProvider {
   async completeStream(options: LLMRequestOptions, callbacks: StreamCallbacks): Promise<LLMResponse> {
     const toolsEnabled = isToolCallingEnabled();
     const messages = this.convertMessages(options.messages, options.systemPrompt, toolsEnabled);
+    // Batch 3: per-call model override. Thread-safe — no provider state mutated.
+    const activeModel = options.model && options.model.trim().length > 0 ? options.model : this.model;
 
     log.debug({
-      messageCount: messages.length, model: this.model, toolsEnabled,
+      messageCount: messages.length, model: activeModel, toolsEnabled,
+      overridden: activeModel !== this.model,
     }, 'Starting streaming request to Ollama');
 
     const tools = toolsEnabled ? this.convertTools(options.tools) : [];
 
     const body: Record<string, unknown> = {
-      model: this.model,
+      model: activeModel,
       messages,
       stream: true,
     };

@@ -66,6 +66,10 @@ export interface LLMRequestOptions {
   temperature?: number;
   stream?: boolean;
   capability?: 'reasoning';
+  /** Batch 3: per-call model override. When set, the provider uses this
+   *  model name for this single request instead of its configured default.
+   *  No global mutation — thread-safe across concurrent calls. */
+  model?: string;
 }
 
 export interface RetrievalMetadataDocument {

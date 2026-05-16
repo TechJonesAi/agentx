@@ -111,6 +111,8 @@ import { ToolOutcomeStore } from './observability/tool-outcome-store.js';
 import { HealthMonitor } from './observability/health-monitor.js';
 import { RuntimeSettingsStore } from './observability/runtime-settings-store.js';
 import { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.js';
+import { classifyTask, type TaskClassification } from './observability/task-classifier.js';
+import { decideRoute, type RoutingDecision } from './observability/model-routing-engine.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -277,6 +279,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   // Batch A2 — Private-memory-first enforcement state.
   private _localOnly = false;
+  /** Cached list of installed local model names. Populated by the
+   *  HealthMonitor's LLM Provider probe on each cycle so routing can
+   *  consult an up-to-date list without re-pinging Ollama every chat. */
+  private _installedLocalModelCache: string[] | null = null;
   private _lastSufficiencyDecision: RetrievalSufficiencyDecision | null = null;
   private _decisionTrace = new DecisionTraceBuffer();
 
@@ -625,6 +631,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _initHealthMonitor(): void {
     if (process.env['AGENTX_DISABLE_HEALTH_MONITOR'] === 'true') return;
     const monitor = HealthMonitor.getInstance();
+    // Batch 3 — repair policy is read live from RuntimeSettingsStore on
+    // every failure so toggling the dashboard setting takes effect for
+    // the very next cycle.
+    monitor.setPolicyResolver(() => RuntimeSettingsStore.getInstance().getKey('repairPolicy'));
     const provider = this.provider;
     const config = this.config;
 
@@ -642,8 +652,11 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
             try {
               const r = await fetch(`${host}/api/tags`, { signal: ctrl.signal });
               if (!r.ok) return { status: 'failed', detail: `ollama ${host} returned ${r.status}` };
-              const data = await r.json() as { models?: unknown[] };
-              const n = Array.isArray(data.models) ? data.models.length : 0;
+              const data = await r.json() as { models?: Array<{ name?: string }> };
+              const list = Array.isArray(data.models) ? data.models : [];
+              // Cache installed model names for ModelRoutingEngine.
+              this._installedLocalModelCache = list.map((m) => m?.name).filter((n): n is string => typeof n === 'string');
+              const n = this._installedLocalModelCache.length;
               if (n === 0) return { status: 'degraded', detail: `ollama reachable but 0 models installed` };
               return { status: 'ok', detail: `${n} model(s) installed` };
             } finally { clearTimeout(t); }
@@ -1883,21 +1896,35 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       callbacks.onRetrieval(this._lastRetrievalMetadata);
     }
 
-    // Record routing decision BEFORE the call so the Active LLM panel
-    // updates the moment a stream starts (not only after it ends).
+    // Batch 3 — real routing engine + classification before each provider call.
+    // The decision is recorded with full provenance (pin? preferred? fallback?)
+    // BEFORE the stream starts so the dashboard updates as soon as the call begins.
+    const classification: TaskClassification = classifyTask(input);
     const active = this.getActiveModel();
+    const decision: RoutingDecision = decideRoute({
+      classification,
+      defaultProvider: active.provider,
+      defaultModel: active.model,
+      pins: settings.modelPins,
+      preferredModels: settings.preferredModels,
+      disabledModels: settings.disabledModels,
+      localOnly: active.localOnly,
+      installedLocalModels: this._installedLocalModelCache ?? [],
+      reliabilityAware: settings.autoRoutingMode === 'reliability-aware',
+    });
     const routingId = ModelRoutingHistory.getInstance().record({
-      taskType: toolDefs.length > 0 ? 'chat+tools' : 'chat',
-      model: active.model,
-      provider: active.provider,
-      reason: this._resolveModelHint() ? 'reasoning-hint applied' : 'default routing',
-      fallbackUsed: false,
+      taskType: decision.taskType,
+      model: decision.model,
+      provider: decision.provider,
+      reason: decision.reason,
+      fallbackUsed: decision.fallbackChain.length > 0,
       localOnly: active.localOnly,
       toolCallingEnabled: active.toolCallingEnabled && toolDefs.length > 0,
     });
     const routingStartedAt = Date.now();
 
-    // First response: stream it
+    // First response: stream it — pass the routed model as a per-call override
+    // so the provider uses it without mutating shared state.
     let response: LLMResponse;
     try {
       response = await this.provider.completeStream(
@@ -1905,6 +1932,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
           messages,
           systemPrompt: augmentedSystemPromptStream,
           tools: toolDefs.length > 0 ? toolDefs : undefined,
+          model: decision.model,
           ...(this._resolveModelHint() ?? {}),
         },
         callbacks,
@@ -1979,6 +2007,23 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     this.sessionManager.update(session.id, this.conversationMemory.getMessages(session.id));
     this.messagesProcessed++;
     this.lastActivityTime = Date.now();
+
+    // Batch 3 — grounded-answer scoring. If retrieval was used and the
+    // assistant did not cite [MEM-N] / [DOC-N], mark groundedAnswer=false
+    // on the most-recent RetrievalOutcome. This patches the in-memory
+    // record so the dashboard reflects it.
+    if (settings.retrievalEnabled && retrievalContextStream) {
+      const cited = /\[(MEM|DOC)-\d+\]/i.test(finalResponse.content);
+      const store = RetrievalOutcomeStore.getInstance();
+      const recent = store.recent(1);
+      const last = recent[0];
+      if (last) {
+        // Mutate the underlying entry — store keeps a reference so this
+        // is visible to subsequent reads. Reliability rollup recomputes
+        // from this state on the next reliability() call.
+        (last as { groundedAnswer: boolean | null }).groundedAnswer = cited;
+      }
+    }
 
     return finalResponse.content;
   }

@@ -552,6 +552,32 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               return;
             }
             const record = recordFn.call(agent, body);
+            // Batch 3 — Self-Learning influence. Thumbs up/down nudges the
+            // ToolOutcomeStore + RetrievalOutcomeStore reliability scoring
+            // by recording a synthetic outcome. Recorded for any tools
+            // listed in body.toolsUsed (optional array of names).
+            try {
+              const rating = String((body as Record<string, unknown>)['rating'] ?? '').toLowerCase();
+              const positive = rating === 'up' || rating === 'positive' || rating === 'thumbs-up';
+              const negative = rating === 'down' || rating === 'negative' || rating === 'thumbs-down';
+              if (positive || negative) {
+                const toolsUsed = Array.isArray((body as Record<string, unknown>)['toolsUsed']) ? ((body as Record<string, unknown>)['toolsUsed'] as unknown[]).filter((t): t is string => typeof t === 'string') : [];
+                const tos = (agent as unknown as { getToolOutcomeStore?: () => { record(n: string, r: string, l: number): void } }).getToolOutcomeStore?.();
+                if (tos) {
+                  for (const t of toolsUsed) {
+                    if (positive) tos.record(t, '[feedback synthetic] user thumbs-up', 0);
+                    else tos.record(t, `[${t} error]: user thumbs-down`, 0);
+                  }
+                }
+                // Retrieval outcome influence — apply to the most recent outcome only.
+                const ros = (agent as unknown as { getRetrievalOutcomeStore?: () => { recent(n?: number): Array<{ groundedAnswer: boolean | null; success: boolean }> } }).getRetrievalOutcomeStore?.();
+                const last = ros?.recent?.(1)?.[0];
+                if (last) {
+                  if (negative) last.success = false;
+                  if (positive && last.groundedAnswer === null) last.groundedAnswer = true;
+                }
+              }
+            } catch { /* feedback influence is best-effort, never break the route */ }
             sendJson(res, 200, { ok: true, feedback: record });
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -736,6 +762,74 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
           return;
         }
+        // Batch 3 — repair approval queue routes.
+        if (route === '/api/health/pending-approvals' && method === 'GET') {
+          try {
+            const m = (agent as unknown as { getHealthMonitor?: () => { pendingApprovals(): unknown[] } }).getHealthMonitor?.();
+            sendJson(res, 200, { available: !!m, pending: m?.pendingApprovals?.() ?? [] });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        if (route.startsWith('/api/health/approve-repair/') && method === 'POST') {
+          const id = route.substring('/api/health/approve-repair/'.length);
+          try {
+            const m = (agent as unknown as { getHealthMonitor?: () => { approveRepair(id: string): Promise<unknown> } }).getHealthMonitor?.();
+            const r = await m?.approveRepair?.(id);
+            if (!r) { sendJson(res, 404, { ok: false, error: 'approval id not found' }); return; }
+            sendJson(res, 200, { ok: true, attempt: r });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route.startsWith('/api/health/reject-repair/') && method === 'POST') {
+          const id = route.substring('/api/health/reject-repair/'.length);
+          try {
+            const m = (agent as unknown as { getHealthMonitor?: () => { rejectRepair(id: string): unknown } }).getHealthMonitor?.();
+            const r = m?.rejectRepair?.(id);
+            if (!r) { sendJson(res, 404, { ok: false, error: 'approval id not found' }); return; }
+            sendJson(res, 200, { ok: true, attempt: r });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Batch 3 — validation scenarios.
+        if (route === '/api/validation/scenarios' && method === 'GET') {
+          try {
+            const mod = await import('@agentx/core') as unknown as { VALIDATION_SCENARIOS: Array<{ name: string }> };
+            sendJson(res, 200, { available: true, scenarios: mod.VALIDATION_SCENARIOS.map((s) => ({ name: s.name })) });
+          } catch (e) {
+            sendJson(res, 200, { available: false, scenarios: [], error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/validation/run-all' && method === 'POST') {
+          try {
+            const mod = await import('@agentx/core') as unknown as { runAllScenarios: (a: unknown) => Promise<Array<{ name: string; pass: boolean }>> };
+            const results = await mod.runAllScenarios(agent);
+            const passCount = results.filter((r) => r.pass).length;
+            sendJson(res, 200, { ok: passCount === results.length, ranAt: new Date().toISOString(), passCount, totalCount: results.length, results });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route.startsWith('/api/validation/run/') && method === 'POST') {
+          const name = decodeURIComponent(route.substring('/api/validation/run/'.length));
+          try {
+            const mod = await import('@agentx/core') as unknown as { runScenario: (n: string, a: unknown) => Promise<{ pass: boolean }> };
+            const result = await mod.runScenario(name, agent);
+            sendJson(res, 200, { ok: result.pass, ranAt: new Date().toISOString(), result });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // Force an immediate probe cycle. Returns the just-run checks.
         if (route === '/api/health/run' && method === 'POST') {
           try {

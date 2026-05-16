@@ -58,6 +58,12 @@ export { RuntimeSettingsStore, DEFAULT_SETTINGS as DEFAULT_RUNTIME_SETTINGS, LIV
 export type { RuntimeSettings } from './observability/runtime-settings-store.js';
 export { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.js';
 export type { RetrievalOutcome, RetrievalReliability } from './observability/retrieval-outcome-store.js';
+export { classifyTask } from './observability/task-classifier.js';
+export type { TaskType, TaskClassification } from './observability/task-classifier.js';
+export { decideRoute } from './observability/model-routing-engine.js';
+export type { RoutingInputs, RoutingDecision } from './observability/model-routing-engine.js';
+export { SCENARIOS as VALIDATION_SCENARIOS, runScenario, runAllScenarios } from './observability/validation-scenarios.js';
+export type { Scenario, ScenarioResult } from './observability/validation-scenarios.js';
 // Tier 2 batch B re-exports — needed by web routes for /api/mcp/* writes.
 // These are route-level config helpers; no MCP runtime instantiation here.
 export { loadMCPConfig, saveMCPConfig, validateServerConfig, DEFAULT_MCP_CONFIG } from './mcp/config.js';
