@@ -109,6 +109,8 @@ import { SystemLogBuffer } from './observability/system-log-buffer.js';
 import { ModelRoutingHistory } from './observability/model-routing-history.js';
 import { ToolOutcomeStore } from './observability/tool-outcome-store.js';
 import { HealthMonitor } from './observability/health-monitor.js';
+import { RuntimeSettingsStore } from './observability/runtime-settings-store.js';
+import { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -1092,6 +1094,8 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getModelRoutingHistory(): ModelRoutingHistory { return ModelRoutingHistory.getInstance(); }
   getToolOutcomeStore(): ToolOutcomeStore { return ToolOutcomeStore.getInstance(); }
   getHealthMonitor(): HealthMonitor { return HealthMonitor.getInstance(); }
+  getRuntimeSettings(): RuntimeSettingsStore { return RuntimeSettingsStore.getInstance(); }
+  getRetrievalOutcomeStore(): RetrievalOutcomeStore { return RetrievalOutcomeStore.getInstance(); }
 
   /** Snapshot of the currently-active model + provider. Used by the
    *  dashboard "Active LLM Routing" panel and Phase 4 truth surface. */
@@ -1795,14 +1799,84 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     };
     this.conversationMemory.addMessage(session.id, userMessage);
 
+    // ── Batch 2 — apply persisted runtime settings BEFORE doing any work ──
+    // Toggles consulted here change behaviour for THIS call.
+    const settings = RuntimeSettingsStore.getInstance().get();
+    // localOnly toggle: privacy-default policy — if EITHER the config-set
+    // _localOnly OR the settings-store localOnly says "true", we run as
+    // localOnly. We never use the settings store to TURN OFF a config-set
+    // localOnly mid-call (that would be a privacy footgun). Updating
+    // settings off→on still flips the flag for this call.
+    if (settings.localOnly && !this._localOnly) {
+      this._localOnly = true;
+    }
+
     let allMessages = this.conversationMemory.getMessages(session.id);
     const contextResult = await this.contextManager.prepareContext(session.id, allMessages);
     const messages = contextResult.messages;
-    const toolDefs = this.toolRegistry.getDefinitions();
+
+    // tool-calling toggle: when off, hand the provider an empty tool list
+    // so it cannot emit tool_calls. Decision-trace records the override.
+    let toolDefs = this.toolRegistry.getDefinitions();
+    if (!settings.toolCallingEnabled) {
+      this._decisionTrace.emit({ event: 'tool_fallback_blocked', tool: '(all)', reason: 'tool_calling_disabled_setting' });
+      toolDefs = [];
+    } else if (settings.autoRoutingMode === 'reliability-aware') {
+      // Self-learning → routing influence. Drop tools whose last 10 calls
+      // are below 50% success. Decision-trace records the demotion so
+      // tests + UI can prove it actually happened.
+      const demoted = ToolOutcomeStore.getInstance().demotedTools();
+      if (demoted.length > 0) {
+        const dropNames = new Set(demoted.map((d) => d.toolName));
+        toolDefs = toolDefs.filter((t) => !dropNames.has(t.name));
+        for (const d of demoted) {
+          this._decisionTrace.emit({
+            event: 'tool_fallback_blocked',
+            tool: d.toolName,
+            reason: `tool_routing_demoted (recent ${Math.round(d.recentSuccessRate * 100)}% over ${d.recentCalls})`,
+          });
+        }
+      }
+    }
 
     this._runIntelligenceObservation(input);
 
-    const retrievalContextStream = await this._buildRetrievalContext(input);
+    // retrieval-enabled toggle: when off, skip retrieval entirely. Record
+    // the skip as a RetrievalOutcome so the dashboard reflects it.
+    let retrievalContextStream: string | null = null;
+    const retrievalT0 = Date.now();
+    if (settings.retrievalEnabled) {
+      try {
+        retrievalContextStream = await this._buildRetrievalContext(input);
+        const meta = this._lastRetrievalMetadata;
+        RetrievalOutcomeStore.getInstance().record({
+          query: input.slice(0, 200),
+          success: retrievalContextStream !== null,
+          matchCount: meta?.retrievalMatchCount ?? 0,
+          sufficient: this._lastSufficiencyDecision?.sufficient ?? null,
+          fallbackUsed: false,
+          latencyMs: Date.now() - retrievalT0,
+          sourceTypes: meta?.retrievalSource ? [meta.retrievalSource] : [],
+          groundedAnswer: null,
+        });
+      } catch (e) {
+        RetrievalOutcomeStore.getInstance().record({
+          query: input.slice(0, 200),
+          success: false,
+          matchCount: 0,
+          sufficient: null,
+          fallbackUsed: false,
+          latencyMs: Date.now() - retrievalT0,
+          sourceTypes: [],
+          groundedAnswer: null,
+          failureReason: e instanceof Error ? e.message : String(e),
+        });
+        // Don't crash the chat call — retrieval is best-effort.
+        retrievalContextStream = null;
+      }
+    } else {
+      this._decisionTrace.emit({ event: 'retrieval_sufficiency_decision', sufficient: false, reason: 'retrieval_disabled_setting' } as never);
+    }
     const augmentedSystemPromptStream = retrievalContextStream ? this.systemPrompt + retrievalContextStream : this.systemPrompt;
     // R3: emit retrieval event BEFORE any model token streaming begins.
     if (this._lastRetrievalMetadata && callbacks.onRetrieval) {

@@ -104,6 +104,34 @@ export class ToolOutcomeStore {
     return out.sort((a, b) => b.totalCalls - a.totalCalls);
   }
 
+  /** Tools that should be demoted from the next provider call because
+   *  their last N calls have been unreliable. Default thresholds:
+   *  - N = last 10 calls of that tool
+   *  - successRate < 0.5
+   *  Returns tool names, sorted alphabetically. */
+  demotedTools(opts: { window?: number; threshold?: number } = {}): Array<{ toolName: string; recentSuccessRate: number; recentCalls: number }> {
+    const window = Math.max(1, opts.window ?? 10);
+    const threshold = opts.threshold ?? 0.5;
+    const by = new Map<string, ToolOutcome[]>();
+    for (const e of this.entries) {
+      const arr = by.get(e.toolName) ?? [];
+      arr.push(e);
+      by.set(e.toolName, arr);
+    }
+    const out: Array<{ toolName: string; recentSuccessRate: number; recentCalls: number }> = [];
+    for (const [toolName, arr] of by.entries()) {
+      const recent = arr.slice(-window);
+      if (recent.length < window) continue;          // need a full window
+      const successes = recent.filter((x) => x.success).length;
+      const rate = successes / recent.length;
+      if (rate < threshold) {
+        out.push({ toolName, recentSuccessRate: rate, recentCalls: recent.length });
+      }
+    }
+    out.sort((a, b) => a.toolName.localeCompare(b.toolName));
+    return out;
+  }
+
   /** Reset the store. Exposed for user "Clear Learning Data" action. */
   clear(): void { this.entries = []; }
 

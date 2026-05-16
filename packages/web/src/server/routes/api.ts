@@ -652,6 +652,78 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
 
         // ─── Skills ─────────────────────────────────────────────────────
+        // ─── Batch 2 — Runtime settings (persisted, live-applied) ───────
+        if (route === '/api/settings/runtime' && method === 'GET') {
+          try {
+            const s = (agent as unknown as { getRuntimeSettings?: () => { get(): unknown } }).getRuntimeSettings?.();
+            sendJson(res, 200, { available: !!s, settings: s?.get?.() ?? null });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/settings/runtime' && method === 'POST') {
+          let body: Record<string, unknown>;
+          try { body = await parseBody(req); } catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+          try {
+            type Store = {
+              update(patch: Record<string, unknown>): Record<string, unknown>;
+              get(): Record<string, unknown>;
+            };
+            const s = (agent as unknown as { getRuntimeSettings?: () => Store }).getRuntimeSettings?.();
+            if (!s) { sendJson(res, 503, { ok: false, available: false }); return; }
+            // Lazy import of class for the helper — keep route-layer lean.
+            const mod = await import('@agentx/core') as unknown as { RuntimeSettingsStore?: { restartRequiredFor(p: Record<string, unknown>): string[] } };
+            const restartReq = mod.RuntimeSettingsStore?.restartRequiredFor?.(body) ?? [];
+            const updated = s.update(body);
+            sendJson(res, 200, {
+              ok: true,
+              settings: updated,
+              restartRequired: restartReq,
+              note: restartReq.length > 0 ? 'Some settings require a server restart to take effect.' : undefined,
+            });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route === '/api/settings/runtime' && method === 'DELETE') {
+          try {
+            const s = (agent as unknown as { getRuntimeSettings?: () => { reset(): unknown } }).getRuntimeSettings?.();
+            sendJson(res, 200, { ok: true, settings: s?.reset?.() ?? null });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // ─── Self-Learning — retrieval-outcome surfaces ────────────────
+        if (route === '/api/learning/retrieval-outcomes' && method === 'GET') {
+          try {
+            const s = (agent as unknown as { getRetrievalOutcomeStore?: () => { recent(n?: number): unknown[]; reliability(): unknown; topSources(n?: number): unknown[]; size(): number } }).getRetrievalOutcomeStore?.();
+            sendJson(res, 200, {
+              available: !!s,
+              size: s?.size?.() ?? 0,
+              reliability: s?.reliability?.() ?? null,
+              topSources: s?.topSources?.(10) ?? [],
+              recent: s?.recent?.(100) ?? [],
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/learning/retrieval-outcomes' && method === 'DELETE') {
+          try {
+            const s = (agent as unknown as { getRetrievalOutcomeStore?: () => { clear(): void } }).getRetrievalOutcomeStore?.();
+            s?.clear?.();
+            sendJson(res, 200, { ok: true, cleared: true });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // ─── Self-Healing — real health monitor surfaces ────────────────
         // Returns live HealthMonitor snapshot: overall status, per-subsystem
         // last check, success/failure tallies, recent checks, repair journal.

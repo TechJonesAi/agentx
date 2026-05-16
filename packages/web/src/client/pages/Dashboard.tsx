@@ -5,6 +5,7 @@ import { ActivityFeed } from '../components/panels/ActivityFeed';
 import { ActiveLLMRouting } from '../components/panels/ActiveLLMRouting';
 import { SelfHealing } from '../components/panels/SelfHealing';
 import { SelfLearning } from '../components/panels/SelfLearning';
+import { RuntimeSettings } from '../components/panels/RuntimeSettings';
 import { QuickActions, type QuickAction } from '../components/QuickActions';
 import '../styles/Dashboard.css';
 
@@ -98,6 +99,10 @@ export function Dashboard() {
         <div className="grid grid-cols-2">
           <SelfHealing />
           <SelfLearning />
+        </div>
+
+        <div className="grid grid-cols-1">
+          <RuntimeSettings />
         </div>
       </div>
     </div>

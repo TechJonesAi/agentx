@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import '../styles/Pages.css';
+import { SelfHealing } from '../components/panels/SelfHealing';
 
 // ---------------------------------------------------------------------------
 // Types (mirrors core integrity types for the UI)
@@ -95,7 +96,7 @@ interface SupervisorStatus {
   unhealthyCount: number;
 }
 
-type TabId = 'overview' | 'diagnostics' | 'repairs' | 'history' | 'services';
+type TabId = 'overview' | 'diagnostics' | 'repairs' | 'history' | 'services' | 'self-healing';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -290,7 +291,7 @@ export function Integrity() {
 
       {/* Tab Bar */}
       <div style={{ display: 'flex', gap: 'var(--spacing-sm)', marginBottom: 'var(--spacing-lg)' }}>
-        {(['overview', 'diagnostics', 'repairs', 'history', 'services'] as TabId[]).map(tab => (
+        {(['overview', 'diagnostics', 'repairs', 'history', 'services', 'self-healing'] as TabId[]).map(tab => (
           <button
             key={tab}
             className={`btn ${activeTab === tab ? 'btn-primary' : 'btn-secondary'}`}
@@ -612,6 +613,13 @@ export function Integrity() {
           ) : (
             <p style={{ color: 'var(--color-text-secondary)' }}>No services registered in supervisor.</p>
           )}
+        </div>
+      )}
+
+      {/* Batch 2: live HealthMonitor view — real probes, real auto-repair journal */}
+      {activeTab === 'self-healing' && (
+        <div style={{ padding: 'var(--spacing-lg)' }}>
+          <SelfHealing />
         </div>
       )}
     </div>

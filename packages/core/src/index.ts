@@ -54,6 +54,10 @@ export { ToolOutcomeStore } from './observability/tool-outcome-store.js';
 export type { ToolOutcome, ToolReliability } from './observability/tool-outcome-store.js';
 export { ModelRoutingHistory } from './observability/model-routing-history.js';
 export type { ModelRoutingDecision } from './observability/model-routing-history.js';
+export { RuntimeSettingsStore, DEFAULT_SETTINGS as DEFAULT_RUNTIME_SETTINGS, LIVE_TOGGLES, RESTART_REQUIRED } from './observability/runtime-settings-store.js';
+export type { RuntimeSettings } from './observability/runtime-settings-store.js';
+export { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.js';
+export type { RetrievalOutcome, RetrievalReliability } from './observability/retrieval-outcome-store.js';
 // Tier 2 batch B re-exports — needed by web routes for /api/mcp/* writes.
 // These are route-level config helpers; no MCP runtime instantiation here.
 export { loadMCPConfig, saveMCPConfig, validateServerConfig, DEFAULT_MCP_CONFIG } from './mcp/config.js';
