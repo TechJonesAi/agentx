@@ -48,6 +48,12 @@ export type { SyncResult } from './db/sync-cognitive-to-retrieval.js';
 export { eventBus } from './agent-loop/event-bus.js';
 export { runtimeStateStore } from './agent-loop/runtime-state.js';
 export { LLMInteractionLogger } from './observability/llm-interaction-logger.js';
+export { HealthMonitor } from './observability/health-monitor.js';
+export type { Probe, HealthCheck, HealthStatus as MonitorHealthStatus, RepairAttempt, RepairOutcome } from './observability/health-monitor.js';
+export { ToolOutcomeStore } from './observability/tool-outcome-store.js';
+export type { ToolOutcome, ToolReliability } from './observability/tool-outcome-store.js';
+export { ModelRoutingHistory } from './observability/model-routing-history.js';
+export type { ModelRoutingDecision } from './observability/model-routing-history.js';
 // Tier 2 batch B re-exports — needed by web routes for /api/mcp/* writes.
 // These are route-level config helpers; no MCP runtime instantiation here.
 export { loadMCPConfig, saveMCPConfig, validateServerConfig, DEFAULT_MCP_CONFIG } from './mcp/config.js';
