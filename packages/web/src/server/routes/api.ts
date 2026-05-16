@@ -652,13 +652,47 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
 
         // ─── Skills ─────────────────────────────────────────────────────
+        // ─── Phase 4 — Active LLM Routing (truth surface) ───────────────
+        // Real backend, no fake numbers. /api/models/active returns the
+        // current provider+model snapshot; /api/models/routing/history
+        // returns recent routing decisions recorded by chatStream().
+        if (route === '/api/models/active' && method === 'GET') {
+          try {
+            const a = agent as unknown as { getActiveModel?: () => unknown };
+            const snap = a.getActiveModel?.() ?? null;
+            sendJson(res, 200, snap ?? { available: false, reason: 'getActiveModel() not implemented' });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/models/routing/history' && method === 'GET') {
+          try {
+            const u = new URL(url, 'http://x');
+            const limit = Math.max(1, Math.min(200, Number(u.searchParams.get('limit') ?? '50')));
+            const h = (agent as unknown as { getModelRoutingHistory?: () => { list(n?: number): unknown[]; current(): unknown } }).getModelRoutingHistory?.();
+            sendJson(res, 200, {
+              available: !!h,
+              current: h?.current?.() ?? null,
+              history: h?.list?.(limit) ?? [],
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, history: [], current: null, error: String(e) });
+          }
+          return;
+        }
+
         if (route === '/api/skills' && method === 'GET') {
           const tools = agent.getToolRegistry().getDefinitions();
+          // All currently-registered tools are built-in. User-defined skills
+          // (MCP/external) would be added via a separate registry path and
+          // tagged with type: 'user'.
           sendJson(res, 200, tools.map((t) => ({
             name: t.name,
             version: '0.1.0',
             description: t.description,
             enabled: true,
+            type: 'built-in',
           })));
           return;
         }
@@ -923,6 +957,75 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           } catch (e) {
             sendJson(res, 200, { available: false, error: String(e) });
           }
+          return;
+        }
+        // Integrity diagnostics — exercises each registered subsystem getter
+        // and reports per-subsystem health. Read-only; no repair side-effects.
+        if (route === '/api/integrity/run-diagnostics' && method === 'POST') {
+          const subsystems: Array<{ name: string; status: 'ok' | 'unavailable' | 'error'; detail?: string }> = [];
+          const a = agent as unknown as Record<string, () => unknown>;
+          const checks: Array<[string, string]> = [
+            ['Tool Registry', 'getToolRegistry'],
+            ['Long-term Memory', 'getLongTermMemory'],
+            ['Conversation Memory', 'getConversationMemory'],
+            ['Session Manager', 'getSessionManager'],
+            ['LLM Provider', 'getProvider'],
+            ['Checkpoint Manager', 'getCheckpointManager'],
+            ['Baseline Registry', 'getBaselineRegistry'],
+            ['Autonomy Gate', 'getAutonomyGate'],
+            ['Learning Engine', 'getLearningEngine'],
+            ['Intelligence Hardening', 'getIntelligenceHardening'],
+            ['LLM Interaction Logger', 'getLLMInteractionLogger'],
+            ['System Log Buffer', 'getSystemLogBuffer'],
+            ['Automation Policy', 'getAutomationPolicyService'],
+            ['Automation Run Store', 'getAutomationRunStore'],
+          ];
+          for (const [label, getter] of checks) {
+            try {
+              const fn = a[getter];
+              if (typeof fn !== 'function') {
+                subsystems.push({ name: label, status: 'unavailable', detail: `${getter}() not implemented` });
+                continue;
+              }
+              const inst = fn.call(agent);
+              if (inst === null || inst === undefined) {
+                subsystems.push({ name: label, status: 'unavailable', detail: 'returned null' });
+              } else {
+                subsystems.push({ name: label, status: 'ok' });
+              }
+            } catch (e) {
+              subsystems.push({ name: label, status: 'error', detail: e instanceof Error ? e.message : String(e) });
+            }
+          }
+          const okCount = subsystems.filter(s => s.status === 'ok').length;
+          const totalCount = subsystems.length;
+          sendJson(res, 200, {
+            ok: true,
+            ranAt: new Date().toISOString(),
+            okCount,
+            totalCount,
+            health: okCount === totalCount ? 'healthy' : okCount > totalCount / 2 ? 'degraded' : 'unhealthy',
+            subsystems,
+          });
+          return;
+        }
+        // Integrity repairs — read-only list of past repair attempts. The
+        // server keeps no repair journal yet, so we return an empty list
+        // with a clear reason rather than a 404. Honest disabled state.
+        if (route === '/api/integrity/repairs' && method === 'GET') {
+          sendJson(res, 200, {
+            available: false,
+            reason: 'Automated repair journal not implemented. Use Run Diagnostics to view subsystem health.',
+            repairs: [],
+          });
+          return;
+        }
+        if (route === '/api/integrity/repair' && method === 'POST') {
+          sendJson(res, 503, {
+            ok: false,
+            available: false,
+            reason: 'Automated repair actions are not yet implemented. Restart the server or check the System Logs tab for diagnostics.',
+          });
           return;
         }
         if (route === '/api/autonomy/status' && method === 'GET') {

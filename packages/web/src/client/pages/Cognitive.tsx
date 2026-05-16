@@ -436,19 +436,27 @@ export function Cognitive() {
 
       {/* Status chips — driven by real backend probe */}
       <div style={{ display: 'flex', gap: '10px', marginBottom: 'var(--spacing-lg)', flexWrap: 'wrap' }}>
-        <span style={{
-          padding: '5px 14px', borderRadius: '20px', fontSize: '13px', fontWeight: 600,
-          background: status?.enabled ? '#1b3a2d' : '#3a1b1b',
-          color: status?.enabled ? '#3fb950' : '#f85149',
-        }}>
-          Cognitive: {status?.enabled ? 'Enabled' : 'Unavailable'}
+        <span
+          title={status?.enabled ? 'Cognitive engine is enabled and ready.' : 'Cognitive engine is gated. Set AGENT_COGNITIVE_ENABLED=true and restart the server to enable.'}
+          style={{
+            padding: '5px 14px', borderRadius: '20px', fontSize: '13px', fontWeight: 600,
+            background: status?.enabled ? '#1b3a2d' : '#3a1b1b',
+            color: status?.enabled ? '#3fb950' : '#f85149',
+            cursor: 'help',
+          }}
+        >
+          Cognitive: {status?.enabled ? 'Enabled' : 'Unavailable — set AGENT_COGNITIVE_ENABLED=true'}
         </span>
-        <span style={{
-          padding: '5px 14px', borderRadius: '20px', fontSize: '13px', fontWeight: 600,
-          background: status?.memoryGateway?.healthy ? '#1b3a2d' : '#3a1b1b',
-          color: status?.memoryGateway?.healthy ? '#3fb950' : '#f85149',
-        }}>
-          Memory: {status?.memoryGateway?.healthy ? 'Connected' : 'Unavailable'}
+        <span
+          title={status?.memoryGateway?.healthy ? 'Memory gateway is connected.' : 'The cognitive memory gateway is not wired. Note: the Memory tab itself (long-term memory + retrieval) works independently and is unaffected.'}
+          style={{
+            padding: '5px 14px', borderRadius: '20px', fontSize: '13px', fontWeight: 600,
+            background: status?.memoryGateway?.healthy ? '#1b3a2d' : '#3a1b1b',
+            color: status?.memoryGateway?.healthy ? '#3fb950' : '#f85149',
+            cursor: 'help',
+          }}
+        >
+          Memory Gateway: {status?.memoryGateway?.healthy ? 'Connected' : 'Unavailable (Memory tab unaffected)'}
         </span>
       </div>
 

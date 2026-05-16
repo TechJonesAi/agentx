@@ -121,7 +121,7 @@ export function Logs() {
         const r = await fetch('/api/logs/llm-interactions?limit=100');
         if (!r.ok) throw new Error(`Failed to load interactions: ${r.statusText}`);
         const data = await r.json();
-        setInteractions(data.interactions ?? []);
+        setInteractions(data.entries ?? data.interactions ?? []);
         setInteractionsError(null);
       } catch (err) {
         setInteractionsError(err instanceof Error ? err.message : 'Failed to load');
@@ -138,7 +138,7 @@ export function Logs() {
       const r = await fetch('/api/logs/llm-interactions?limit=100');
       if (r.ok) {
         const data = await r.json();
-        setInteractions(data.interactions ?? []);
+        setInteractions(data.entries ?? data.interactions ?? []);
         setInteractionsError(null);
       }
     } finally {

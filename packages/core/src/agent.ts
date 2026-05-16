@@ -106,6 +106,7 @@ import type { EmailSource } from './email/email-runner.js';
 import { createImapSource } from './email/imap-source.js';
 import { LLMInteractionLogger } from './observability/llm-interaction-logger.js';
 import { SystemLogBuffer } from './observability/system-log-buffer.js';
+import { ModelRoutingHistory } from './observability/model-routing-history.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -958,6 +959,22 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   /** Singleton observability loggers — exposed for the Logs page. */
   getLLMInteractionLogger(): LLMInteractionLogger { return LLMInteractionLogger.getInstance(); }
   getSystemLogBuffer(): SystemLogBuffer { return SystemLogBuffer.getInstance(); }
+  getModelRoutingHistory(): ModelRoutingHistory { return ModelRoutingHistory.getInstance(); }
+
+  /** Snapshot of the currently-active model + provider. Used by the
+   *  dashboard "Active LLM Routing" panel and Phase 4 truth surface. */
+  getActiveModel(): { provider: string; model: string; localOnly: boolean; toolCallingEnabled: boolean } {
+    const cfg = this.config;
+    const providerId = cfg.agent.defaultProvider;
+    const providerCfg = (cfg.providers as Record<string, { model?: string } | undefined>)[providerId];
+    const model = providerCfg?.model ?? cfg.agent.model ?? '(unknown)';
+    return {
+      provider: providerId,
+      model,
+      localOnly: this._localOnly,
+      toolCallingEnabled: process.env['AGENTX_OLLAMA_TOOL_CALLING'] === 'true' || providerId !== 'ollama',
+    };
+  }
   getGlobalLearningService(): GlobalLearningService | null { return this._globalLearningService; }
   getBuildIntelligenceService(): BuildIntelligenceService | null { return this._buildIntelligenceService; }
   getSelfImprovementService(): SelfImprovementService | null { return this._selfImprovementService; }
@@ -1646,6 +1663,20 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       callbacks.onRetrieval(this._lastRetrievalMetadata);
     }
 
+    // Record routing decision BEFORE the call so the Active LLM panel
+    // updates the moment a stream starts (not only after it ends).
+    const active = this.getActiveModel();
+    const routingId = ModelRoutingHistory.getInstance().record({
+      taskType: toolDefs.length > 0 ? 'chat+tools' : 'chat',
+      model: active.model,
+      provider: active.provider,
+      reason: this._resolveModelHint() ? 'reasoning-hint applied' : 'default routing',
+      fallbackUsed: false,
+      localOnly: active.localOnly,
+      toolCallingEnabled: active.toolCallingEnabled && toolDefs.length > 0,
+    });
+    const routingStartedAt = Date.now();
+
     // First response: stream it
     let response: LLMResponse;
     try {
@@ -1658,7 +1689,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         },
         callbacks,
       );
+      ModelRoutingHistory.getInstance().setLatency(routingId, Date.now() - routingStartedAt);
     } catch (error) {
+      ModelRoutingHistory.getInstance().setLatency(routingId, Date.now() - routingStartedAt);
       const err = error instanceof Error ? error : new Error(String(error));
       if (callbacks.onError) callbacks.onError(err);
       throw err;

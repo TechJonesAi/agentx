@@ -143,7 +143,16 @@ export function AgentLoopsPanel() {
       const data = await res.json();
 
       if (!res.ok) {
-        setError(data.error || 'Failed to run agent loop');
+        // Honest disabled-state messaging when the feature is gated off.
+        if (res.status === 503 && data?.reason === 'agent_loops_disabled') {
+          setError(
+            'Agent Loops are disabled by default. To enable, restart the server with '
+            + 'AGENTX_ENABLE_AGENT_LOOPS=true. Loops run autonomously for up to 5 minutes '
+            + 'and can call any registered tool.'
+          );
+          return;
+        }
+        setError(data?.error || `Failed to run agent loop (HTTP ${res.status})`);
         return;
       }
 
