@@ -27,9 +27,18 @@ export interface RoutingInputs {
   disabledModels: string[];
   localOnly: boolean;
   installedLocalModels: string[];
-  /** True if reliability-aware mode is on. Currently advisory; future
-   *  batches will inform model-level reliability from per-model latency. */
+  /** True if reliability-aware mode is on. When on, the engine consults
+   *  perModelHealth and demotes models whose recent p95 latency exceeds
+   *  the threshold (Batch 6 telemetry-driven intelligence). */
   reliabilityAware: boolean;
+  /** Per-model recent health derived from TelemetryStore. Models whose
+   *  p95Latency exceeds slowThresholdMs and have totalCalls >= minCalls
+   *  are treated as degraded. */
+  perModelHealth?: Record<string, { totalCalls: number; p95LatencyMs: number; successRate: number }>;
+  /** A model with p95 latency above this many ms is demoted. Default 15000. */
+  slowThresholdMs?: number;
+  /** Minimum total calls before demotion is considered. Default 5. */
+  minCallsForDemotion?: number;
 }
 
 export interface RoutingDecision {
@@ -44,6 +53,25 @@ export interface RoutingDecision {
 
 const LOCAL_PROVIDERS = new Set(['ollama', 'local', 'llama-cpp']);
 
+/** True when telemetry says this model has been consistently slow/failing
+ *  and we should prefer something else. Pure helper — no side effects. */
+function isDegradedByTelemetry(model: string, inputs: RoutingInputs): { degraded: boolean; reason?: string } {
+  if (!inputs.reliabilityAware) return { degraded: false };
+  if (!inputs.perModelHealth) return { degraded: false };
+  const h = inputs.perModelHealth[`${inputs.defaultProvider}:${model}`] ?? inputs.perModelHealth[model];
+  if (!h) return { degraded: false };
+  const min = inputs.minCallsForDemotion ?? 5;
+  if (h.totalCalls < min) return { degraded: false };
+  const threshold = inputs.slowThresholdMs ?? 15000;
+  if (h.p95LatencyMs > threshold) {
+    return { degraded: true, reason: `telemetry: p95 ${h.p95LatencyMs}ms exceeds ${threshold}ms over ${h.totalCalls} call(s)` };
+  }
+  if (h.successRate < 0.5 && h.totalCalls >= min) {
+    return { degraded: true, reason: `telemetry: successRate ${Math.round(h.successRate * 100)}% over ${h.totalCalls} call(s)` };
+  }
+  return { degraded: false };
+}
+
 export function decideRoute(inputs: RoutingInputs): RoutingDecision {
   const fallbackChain: Array<{ model: string; skipped: string }> = [];
   const t = inputs.classification.primary;
@@ -56,15 +84,20 @@ export function decideRoute(inputs: RoutingInputs): RoutingDecision {
     } else if (inputs.localOnly && inputs.installedLocalModels.length > 0 && !inputs.installedLocalModels.includes(pinned)) {
       fallbackChain.push({ model: pinned, skipped: `localOnly: ${pinned} not installed locally` });
     } else {
-      return {
-        model: pinned,
-        provider: inputs.defaultProvider,
-        reason: `pinned via Models page for task '${t}'`,
-        pinUsed: true,
-        fallbackChain,
-        taskType: t,
-        classificationConfidence: inputs.classification.confidence,
-      };
+      const degr = isDegradedByTelemetry(pinned, inputs);
+      if (degr.degraded) {
+        fallbackChain.push({ model: pinned, skipped: degr.reason ?? 'telemetry-degraded' });
+      } else {
+        return {
+          model: pinned,
+          provider: inputs.defaultProvider,
+          reason: `pinned via Models page for task '${t}'`,
+          pinUsed: true,
+          fallbackChain,
+          taskType: t,
+          classificationConfidence: inputs.classification.confidence,
+        };
+      }
     }
   }
 
@@ -76,6 +109,11 @@ export function decideRoute(inputs: RoutingInputs): RoutingDecision {
     }
     if (inputs.localOnly && inputs.installedLocalModels.length > 0 && !inputs.installedLocalModels.includes(m)) {
       fallbackChain.push({ model: m, skipped: 'localOnly: not installed' });
+      continue;
+    }
+    const degr = isDegradedByTelemetry(m, inputs);
+    if (degr.degraded) {
+      fallbackChain.push({ model: m, skipped: degr.reason ?? 'telemetry-degraded' });
       continue;
     }
     return {

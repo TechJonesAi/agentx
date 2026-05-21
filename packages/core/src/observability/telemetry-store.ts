@@ -121,4 +121,31 @@ export class TelemetryStore {
 
   clear(): void { this.entries = []; }
   size(): number { return this.entries.length; }
+
+  /** Batch 6D — per-model health derived from llm.* telemetry entries.
+   *  Keyed by the label field (which chatStream sets to "provider:model").
+   *  Used by ModelRoutingEngine for latency-driven model demotion. */
+  perModelHealth(): Record<string, { totalCalls: number; p95LatencyMs: number; successRate: number }> {
+    const byLabel = new Map<string, TelemetryEntry[]>();
+    for (const e of this.entries) {
+      if (e.kind !== 'llm.complete' && e.kind !== 'llm.stream') continue;
+      const arr = byLabel.get(e.label) ?? [];
+      arr.push(e);
+      byLabel.set(e.label, arr);
+    }
+    const out: Record<string, { totalCalls: number; p95LatencyMs: number; successRate: number }> = {};
+    for (const [label, list] of byLabel.entries()) {
+      const latencies = list.map((e) => e.latencyMs).sort((a, b) => a - b);
+      const idx95 = Math.min(latencies.length - 1, Math.max(0, Math.floor(0.95 * latencies.length)));
+      const p95 = latencies[idx95] ?? 0;
+      const successList = list.filter((e) => typeof e.success === 'boolean');
+      const successCount = successList.filter((e) => e.success === true).length;
+      out[label] = {
+        totalCalls: list.length,
+        p95LatencyMs: p95,
+        successRate: successList.length > 0 ? successCount / successList.length : 1,
+      };
+    }
+    return out;
+  }
 }

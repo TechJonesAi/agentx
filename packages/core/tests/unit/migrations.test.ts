@@ -45,7 +45,8 @@ const SLOW_IO_TIMEOUT_MS = 60_000;
 describe('cognitive memory migrations', () => {
   it('applies all migrations cleanly on a fresh database', () => {
     const result = runCognitiveMemoryMigrations(db);
-    expect(result.count).toBe(6);
+    // Batch 6A added migration 008_workflow_runs — total is now 7.
+    expect(result.count).toBe(7);
     expect(result.ftsAvailable).toBe(true);
   }, SLOW_IO_TIMEOUT_MS);
 
@@ -65,6 +66,7 @@ describe('cognitive memory migrations', () => {
       '005_lifelong_memory',
       '006_document_identity',
       '007_fts_contentless',
+      '008_workflow_runs',
     ]);
   }, SLOW_IO_TIMEOUT_MS);
 
@@ -108,6 +110,6 @@ describe('cognitive memory migrations', () => {
     // Apply 001 directly so the rest of the chain has its tables.
     db.exec(fs.readFileSync(path.join(__dirname, '../../src/db/migrations/001_cognitive_memory.sql'), 'utf-8'));
     const result = runCognitiveMemoryMigrations(db);
-    expect(result.count).toBe(5); // 002, 003, 005, 006, 007 applied, 001 skipped
+    expect(result.count).toBe(6); // 002, 003, 005, 006, 007, 008 applied, 001 skipped
   }, SLOW_IO_TIMEOUT_MS);
 });

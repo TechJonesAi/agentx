@@ -115,6 +115,7 @@ import { classifyTask, type TaskClassification } from './observability/task-clas
 import { decideRoute, type RoutingDecision } from './observability/model-routing-engine.js';
 import { SCENARIOS as _VALIDATION_SCENARIOS } from './observability/validation-scenarios.js';
 import { TelemetryStore } from './observability/telemetry-store.js';
+import { WorkflowRunStore } from './observability/workflow-run-store.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -522,6 +523,18 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       intelligence: this._intelligenceEnabled,
     }, 'Agent initialized');
 
+    // Batch 6A — workflow durability: any workflow left in a non-terminal
+    // state from a prior process is marked interrupted_by_restart and
+    // gets a recovery event in the timeline so the operator can see it.
+    try {
+      const recoveredCount = WorkflowRunStore.get(this.db).recoverIncomplete();
+      if (recoveredCount > 0) {
+        log.info({ count: recoveredCount }, 'Workflow durability: recovered interrupted runs after restart');
+      }
+    } catch (e) {
+      log.warn({ error: e instanceof Error ? e.message : String(e) }, 'Workflow recoverIncomplete failed (non-fatal)');
+    }
+
     // Loud warning when the configured provider has no auth and isn't a
     // local provider. Surfaces to the startup log so operators see this
     // before the first chat() call returns 503.
@@ -889,6 +902,72 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       },
     });
 
+    // ── Batch 6A — workflow durability + autonomy hardening probes ───────
+
+    // 12) Workflow Runtime — verifies the durable workflow table exists
+    //     and recoverIncomplete() executes without throwing.
+    monitor.registerProbe({
+      name: 'Workflow Runtime',
+      run: async () => {
+        try {
+          const summary = WorkflowRunStore.get(this.db).summary();
+          const total = Object.values(summary).reduce((s, n) => s + n, 0);
+          return { status: 'ok', detail: `${total} workflow run(s); running=${summary.running ?? 0} failed=${summary.failed ?? 0}` };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+    // 13) Telemetry Pipeline — confirms TelemetryStore singleton accepts
+    //     a sentinel write and rollups don't throw.
+    monitor.registerProbe({
+      name: 'Telemetry Pipeline',
+      run: async () => {
+        try {
+          const t = TelemetryStore.getInstance();
+          const sizeBefore = t.size();
+          t.record({ kind: 'tool.exec', label: '__healthcheck__', latencyMs: 0 });
+          const sizeAfter = t.size();
+          const rollups = t.rollupByKind();
+          return { status: 'ok', detail: `size ${sizeBefore}→${sizeAfter}, ${rollups.length} kind(s) rolled up` };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+    // 14) Decision Trace Pipeline — confirms the agent's decision trace
+    //     snapshot accessor returns an array (even when empty).
+    monitor.registerProbe({
+      name: 'Decision Trace',
+      run: async () => {
+        try {
+          const events = this.getLastDecisionTrace();
+          if (!Array.isArray(events)) return { status: 'failed', detail: 'snapshot returned non-array' };
+          return { status: 'ok', detail: `${events.length} event(s) from last call` };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+    // 15) DB Integrity — fast PRAGMA integrity_check.
+    monitor.registerProbe({
+      name: 'DB Integrity',
+      run: async () => {
+        try {
+          const row = this.db.prepare('PRAGMA quick_check').get() as { quick_check?: string } | undefined;
+          const result = row?.quick_check ?? 'unknown';
+          return result === 'ok'
+            ? { status: 'ok', detail: 'quick_check ok' }
+            : { status: 'failed', detail: `quick_check: ${result}` };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
     // Run a probe cycle every 60s. Use 15s for the first 5 minutes for
     // faster boot-time signal, then settle into 60s cadence.
     monitor.start(60000);
@@ -1247,6 +1326,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getRuntimeSettings(): RuntimeSettingsStore { return RuntimeSettingsStore.getInstance(); }
   getRetrievalOutcomeStore(): RetrievalOutcomeStore { return RetrievalOutcomeStore.getInstance(); }
   getTelemetryStore(): TelemetryStore { return TelemetryStore.getInstance(); }
+  getWorkflowRunStore(): WorkflowRunStore { return WorkflowRunStore.get(this.db); }
 
   /** Snapshot of the currently-active model + provider. Used by the
    *  dashboard "Active LLM Routing" panel and Phase 4 truth surface. */
@@ -2049,6 +2129,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       localOnly: active.localOnly,
       installedLocalModels: this._installedLocalModelCache ?? [],
       reliabilityAware: settings.autoRoutingMode === 'reliability-aware',
+      // Batch 6D — telemetry-driven model demotion. perModelHealth feeds
+      // p95 latency + success rate so routing prefers healthy models.
+      perModelHealth: TelemetryStore.getInstance().perModelHealth(),
     });
     const routingId = ModelRoutingHistory.getInstance().record({
       taskType: decision.taskType,

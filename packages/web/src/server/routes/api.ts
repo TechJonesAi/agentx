@@ -649,13 +649,10 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
-        if (route === '/api/workflows' && method === 'GET') {
-          sendJson(res, 200, {
-            totalWorkflows: 0, activeWorkflows: 0, completedWorkflows: 0,
-            failedWorkflows: 0, averageExecutionTime: 0, successRate: 0,
-          });
-          return;
-        }
+        // (Batch 6A) — legacy /api/workflows stub removed. The real
+        // handler lives below and reads from WorkflowRunStore (durable
+        // SQLite). Keep this comment as a regression marker so the stub
+        // doesn't return.
 
         if (route === '/api/logs' && method === 'GET') {
           sendJson(res, 200, []);
@@ -762,6 +759,69 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
           return;
         }
+        // Batch 6A — Workflow durability surfaces. Real persisted state
+        // from the workflow_runs + workflow_events SQLite tables.
+        if (route === '/api/workflows' && method === 'GET') {
+          try {
+            const u = new URL(url, 'http://x');
+            const state = u.searchParams.get('state') ?? undefined;
+            const limit = Math.max(1, Math.min(500, Number(u.searchParams.get('limit') ?? '100')));
+            const s = (agent as unknown as { getWorkflowRunStore?: () => { list(o?: { state?: string; limit?: number }): unknown[]; summary(): Record<string, number> } }).getWorkflowRunStore?.();
+            sendJson(res, 200, {
+              available: !!s,
+              summary: s?.summary?.() ?? {},
+              runs: s?.list?.({ state, limit }) ?? [],
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, runs: [], summary: {}, error: String(e) });
+          }
+          return;
+        }
+        if (route.startsWith('/api/workflows/') && !route.includes('/pause') && !route.includes('/resume') && method === 'GET') {
+          const loopId = decodeURIComponent(route.substring('/api/workflows/'.length));
+          try {
+            const s = (agent as unknown as { getWorkflowRunStore?: () => { get(id: string): unknown; getEvents(id: string, o?: { limit?: number }): unknown[] } }).getWorkflowRunStore?.();
+            const run = s?.get?.(loopId);
+            if (!run) { sendJson(res, 404, { ok: false, error: 'workflow not found' }); return; }
+            sendJson(res, 200, { ok: true, run, events: s?.getEvents?.(loopId) ?? [] });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route.match(/^\/api\/workflows\/[^/]+\/pause$/) && method === 'POST') {
+          const loopId = decodeURIComponent(route.substring('/api/workflows/'.length).replace('/pause', ''));
+          let body: Record<string, unknown> = {};
+          try { body = await parseBody(req); } catch { /* */ }
+          try {
+            const s = (agent as unknown as { getWorkflowRunStore?: () => { get(id: string): unknown; markPaused(id: string, r: string): void } }).getWorkflowRunStore?.();
+            if (!s?.get?.(loopId)) { sendJson(res, 404, { ok: false, error: 'workflow not found' }); return; }
+            const reason = typeof body['reason'] === 'string' ? body['reason'] as string : 'paused by operator';
+            s.markPaused(loopId, reason);
+            sendJson(res, 200, { ok: true });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route.match(/^\/api\/workflows\/[^/]+\/resume$/) && method === 'POST') {
+          const loopId = decodeURIComponent(route.substring('/api/workflows/'.length).replace('/resume', ''));
+          let body: Record<string, unknown> = {};
+          try { body = await parseBody(req); } catch { /* */ }
+          try {
+            const s = (agent as unknown as { getWorkflowRunStore?: () => { get(id: string): { state: string } | null; resume(id: string, from: string): void } }).getWorkflowRunStore?.();
+            if (!s) { sendJson(res, 503, { ok: false, error: 'workflow store unavailable' }); return; }
+            const run = s.get(loopId);
+            if (!run) { sendJson(res, 404, { ok: false, error: 'workflow not found' }); return; }
+            const from = typeof body['from'] === 'string' ? body['from'] as string : run.state;
+            s.resume(loopId, from);
+            sendJson(res, 200, { ok: true });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // Batch 5 — Telemetry surface (live perf metrics).
         if (route === '/api/telemetry/recent' && method === 'GET') {
           try {

@@ -8,6 +8,7 @@ import { SelfLearning } from '../components/panels/SelfLearning';
 import { RuntimeSettings } from '../components/panels/RuntimeSettings';
 import { DecisionTrace } from '../components/panels/DecisionTrace';
 import { DegradedServices } from '../components/panels/DegradedServices';
+import { Workflows } from '../components/panels/Workflows';
 import { QuickActions, type QuickAction } from '../components/QuickActions';
 import '../styles/Dashboard.css';
 
@@ -106,6 +107,10 @@ export function Dashboard() {
         <div className="grid grid-cols-2">
           <DecisionTrace />
           <DegradedServices />
+        </div>
+
+        <div className="grid grid-cols-1">
+          <Workflows />
         </div>
 
         <div className="grid grid-cols-1">
