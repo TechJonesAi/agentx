@@ -762,6 +762,103 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
           return;
         }
+        // Batch 4 — Operator-trust surface. Returns the list of services
+        // that are NOT currently fully operational, each with why/impact/
+        // next-action/recovery-path. Built from live HealthMonitor +
+        // RuntimeSettings + known optional-dependency probes.
+        if (route === '/api/services/degraded' && method === 'GET') {
+          type Service = { name: string; state: 'unavailable' | 'degraded' | 'ok'; why: string; impact: string; nextAction: string; recoveryPath: string };
+          const services: Service[] = [];
+
+          // From HealthMonitor — any subsystem in 'failed' or 'degraded' state.
+          try {
+            const m = (agent as unknown as { getHealthMonitor?: () => { snapshot(): { subsystems: Array<{ name: string; lastStatus: string; lastDetail?: string }> } } }).getHealthMonitor?.();
+            const snap = m?.snapshot?.();
+            for (const s of snap?.subsystems ?? []) {
+              if (s.lastStatus === 'failed') {
+                services.push({
+                  name: s.name,
+                  state: 'unavailable',
+                  why: s.lastDetail ?? 'last probe failed',
+                  impact: `Subsystem ${s.name} is not responding — dependent features may fail.`,
+                  nextAction: 'Inspect Self-Healing panel and approve any pending repair, or restart the relevant service.',
+                  recoveryPath: 'POST /api/health/run forces a fresh probe cycle.',
+                });
+              } else if (s.lastStatus === 'degraded') {
+                services.push({
+                  name: s.name,
+                  state: 'degraded',
+                  why: s.lastDetail ?? 'partial functionality',
+                  impact: `Some features depending on ${s.name} may be limited.`,
+                  nextAction: 'Review subsystem detail and the Integrity → Self-Healing tab.',
+                  recoveryPath: 'POST /api/health/run forces a fresh probe cycle.',
+                });
+              }
+            }
+          } catch { /* */ }
+
+          // Known optional-dependency / feature-flag surfaces — explicit
+          // honest entries so the operator sees the real state.
+          try {
+            const Tesseract = await import('tesseract.js' as string).catch(() => null);
+            if (!Tesseract) {
+              services.push({
+                name: 'Vision / OCR',
+                state: 'unavailable',
+                why: 'tesseract.js is not installed.',
+                impact: 'Image upload + OCR text extraction is disabled.',
+                nextAction: 'pnpm add tesseract.js in the web package and restart.',
+                recoveryPath: 'Once tesseract.js is on disk, this entry clears automatically on next refresh.',
+              });
+            }
+          } catch { /* */ }
+
+          // TTS local-mode status (honest — Qwen3 sidecar isn't a local
+          // executable yet on every platform).
+          try {
+            const localTts = process.env['AGENTX_TTS_LOCAL_BACKEND'];
+            if (!localTts || (localTts !== 'piper' && localTts !== 'kokoro')) {
+              services.push({
+                name: 'TTS Local Backend',
+                state: 'degraded',
+                why: 'No native local TTS backend configured (piper / kokoro). The hosted Qwen3 endpoint or edge-tts may be used instead.',
+                impact: 'Voice synthesis may emit network requests under localOnly mode.',
+                nextAction: 'Install Piper (https://github.com/rhasspy/piper) or Kokoro and set AGENTX_TTS_LOCAL_BACKEND=piper.',
+                recoveryPath: 'Restart server after setting the env var. localOnly mode will then be truthful for TTS.',
+              });
+            }
+          } catch { /* */ }
+
+          // Agent Loops gate.
+          if (process.env['AGENTX_ENABLE_AGENT_LOOPS'] !== 'true') {
+            services.push({
+              name: 'Agent Loops',
+              state: 'unavailable',
+              why: 'Disabled by default (AGENTX_ENABLE_AGENT_LOOPS env var is not "true").',
+              impact: 'Autonomous goal-driven loops cannot run. The Run button on the Agent Loops tab returns 503.',
+              nextAction: 'Restart server with AGENTX_ENABLE_AGENT_LOOPS=true.',
+              recoveryPath: 'Loops are bound by a 5-minute internal timeout and can call any registered tool — review safety before enabling.',
+            });
+          }
+
+          sendJson(res, 200, { ranAt: new Date().toISOString(), services });
+          return;
+        }
+
+        // Batch 4 — Decision Trace surface. Returns the most recent
+        // chatStream() decision trace events (private-memory-first +
+        // routing decisions + tool gates).
+        if (route === '/api/decision-trace/last' && method === 'GET') {
+          try {
+            const a = agent as unknown as { getLastDecisionTrace?: () => unknown[] };
+            const events = a.getLastDecisionTrace?.() ?? [];
+            sendJson(res, 200, { available: true, count: events.length, events });
+          } catch (e) {
+            sendJson(res, 200, { available: false, count: 0, events: [], error: String(e) });
+          }
+          return;
+        }
+
         // Batch 3 — repair approval queue routes.
         if (route === '/api/health/pending-approvals' && method === 'GET') {
           try {

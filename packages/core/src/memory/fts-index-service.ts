@@ -3,6 +3,61 @@ import { createLogger } from '../logger.js';
 
 const log = createLogger('memory:fts-index');
 
+/**
+ * Sanitize a natural-language query into a syntactically-valid FTS5 MATCH
+ * expression. FTS5 treats `-`, `*`, `:`, `"`, `(`, `)`, `^`, `+`, and a
+ * few keywords (NEAR, AND, OR, NOT) as operators — feeding a raw user
+ * question containing any of these silently fails or returns zero results.
+ *
+ * This function:
+ *  - lowercases
+ *  - strips diacritics
+ *  - drops every non-alphanumeric/space character (so `it's` → `it s`)
+ *  - removes 1-character tokens that aren't digits
+ *  - joins the surviving terms with implicit-AND spacing (FTS5 default)
+ *  - if the original looked like a quoted phrase ("two words"), preserves
+ *    that as a phrase token
+ *  - returns null when nothing usable survives (caller MUST treat null as
+ *    "do not run this match — return empty results")
+ */
+export function safeFtsQuery(input: string): string | null {
+  if (typeof input !== 'string') return null;
+  const raw = input.trim();
+  if (!raw) return null;
+
+  // Preserve quoted phrases as FTS5 phrase tokens.
+  const phrases: string[] = [];
+  const phraseFree = raw.replace(/"([^"]+)"/g, (_, p: string) => {
+    const cleaned = sanitizeToken(p);
+    if (cleaned) phrases.push(`"${cleaned}"`);
+    return ' ';
+  });
+
+  const terms = phraseFree
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .split(/[^a-z0-9]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2 || /^[0-9]+$/.test(t))
+    // FTS5 keywords that must not be left bare (would be interpreted as ops)
+    .filter((t) => !['and', 'or', 'not', 'near'].includes(t));
+
+  const tokens = [...phrases, ...terms];
+  if (tokens.length === 0) return null;
+  return tokens.join(' ');
+}
+
+function sanitizeToken(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export interface DocumentFtsContent {
   title?: string;
   sender?: string;
@@ -70,6 +125,13 @@ export class FtsIndexService {
   }
 
   searchDocuments(query: string, limit: number = 10): Array<{ document_id: string; rank: number }> {
+    // Batch 4: sanitize natural-language queries so punctuation / hyphens /
+    // FTS5 keywords don't silently zero-out the result set.
+    const safe = safeFtsQuery(query);
+    if (!safe) {
+      log.debug({ query }, 'FTS document search skipped — query reduced to empty after sanitization');
+      return [];
+    }
     try {
       // Contentless FTS5 doesn't store column values; resolve document_id via
       // rowid join with the source documents table.
@@ -82,15 +144,20 @@ export class FtsIndexService {
         LIMIT ?
       `);
 
-      const results = stmt.all(query, limit) as Array<{ document_id: string; rank: number }>;
+      const results = stmt.all(safe, limit) as Array<{ document_id: string; rank: number }>;
       return results;
     } catch (error) {
-      log.error({ query, error }, 'Document FTS search failed');
+      log.error({ query, safe, error }, 'Document FTS search failed');
       return [];
     }
   }
 
   searchChunks(query: string, limit: number = 10): Array<{ chunk_id: string; document_id: string; rank: number }> {
+    const safe = safeFtsQuery(query);
+    if (!safe) {
+      log.debug({ query }, 'FTS chunk search skipped — query reduced to empty after sanitization');
+      return [];
+    }
     try {
       // Contentless FTS5 — resolve chunk_id and document_id via rowid join.
       const stmt = this.db.prepare(`
@@ -102,10 +169,10 @@ export class FtsIndexService {
         LIMIT ?
       `);
 
-      const results = stmt.all(query, limit) as Array<{ chunk_id: string; document_id: string; rank: number }>;
+      const results = stmt.all(safe, limit) as Array<{ chunk_id: string; document_id: string; rank: number }>;
       return results;
     } catch (error) {
-      log.error({ query, error }, 'Chunk FTS search failed');
+      log.error({ query, safe, error }, 'Chunk FTS search failed');
       return [];
     }
   }
