@@ -113,6 +113,7 @@ import { RuntimeSettingsStore } from './observability/runtime-settings-store.js'
 import { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.js';
 import { classifyTask, type TaskClassification } from './observability/task-classifier.js';
 import { decideRoute, type RoutingDecision } from './observability/model-routing-engine.js';
+import { SCENARIOS as _VALIDATION_SCENARIOS } from './observability/validation-scenarios.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -798,8 +799,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       name: 'Routing Engine',
       run: async () => {
         try {
-          const mod = await import('./observability/model-routing-engine.js');
-          const d = mod.decideRoute({
+          // decideRoute is statically imported at module top — no dynamic
+          // import cost per probe (Windows CI sensitivity).
+          const d = decideRoute({
             classification: { primary: 'chat', confidence: 0.5, signals: [] },
             defaultProvider: this.config.agent.defaultProvider,
             defaultModel: this.config.agent.model ?? 'm',
@@ -819,8 +821,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       name: 'Validation Runner',
       run: async () => {
         try {
-          const mod = await import('./observability/validation-scenarios.js');
-          const n = mod.SCENARIOS.length;
+          const n = _VALIDATION_SCENARIOS.length;
           return n > 0
             ? { status: 'ok', detail: `${n} scenario(s) registered` }
             : { status: 'degraded', detail: 'no scenarios registered' };

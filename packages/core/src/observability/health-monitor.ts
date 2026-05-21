@@ -140,8 +140,15 @@ export class HealthMonitor {
 
   start(intervalMs = 60000): void {
     if (this.timer) return;
-    // Run one immediate cycle for warm dashboard state, then every interval.
-    this.runAll().catch(() => { /* never throw from background */ });
+    // Defer the first probe cycle to setImmediate / setTimeout so the
+    // caller (typically agent constructor) never blocks on probe work.
+    // On Windows CI, synchronous file-system + dynamic-import latency
+    // in 11 probes can push the test-runner hook timeout past 10s if
+    // microtasks queue ahead of the test's own beforeEach work.
+    const kickoff = setTimeout(() => {
+      this.runAll().catch(() => { /* never throw from background */ });
+    }, 0);
+    if (typeof kickoff.unref === 'function') kickoff.unref();
     this.timer = setInterval(() => {
       this.runAll().catch(() => { /* never throw from background */ });
     }, intervalMs);
