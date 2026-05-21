@@ -114,6 +114,7 @@ import { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.j
 import { classifyTask, type TaskClassification } from './observability/task-classifier.js';
 import { decideRoute, type RoutingDecision } from './observability/model-routing-engine.js';
 import { SCENARIOS as _VALIDATION_SCENARIOS } from './observability/validation-scenarios.js';
+import { TelemetryStore } from './observability/telemetry-store.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -1245,6 +1246,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getHealthMonitor(): HealthMonitor { return HealthMonitor.getInstance(); }
   getRuntimeSettings(): RuntimeSettingsStore { return RuntimeSettingsStore.getInstance(); }
   getRetrievalOutcomeStore(): RetrievalOutcomeStore { return RetrievalOutcomeStore.getInstance(); }
+  getTelemetryStore(): TelemetryStore { return TelemetryStore.getInstance(); }
 
   /** Snapshot of the currently-active model + provider. Used by the
    *  dashboard "Active LLM Routing" panel and Phase 4 truth surface. */
@@ -2073,9 +2075,28 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         },
         callbacks,
       );
-      ModelRoutingHistory.getInstance().setLatency(routingId, Date.now() - routingStartedAt);
+      const latencyMs = Date.now() - routingStartedAt;
+      ModelRoutingHistory.getInstance().setLatency(routingId, latencyMs);
+      // Batch 5 — telemetry: record per-call tokens-in/out + latency so the
+      // dashboard's Telemetry surface can compute tokens/sec and p50/p95.
+      TelemetryStore.getInstance().record({
+        kind: 'llm.stream',
+        label: `${decision.provider}:${decision.model}`,
+        latencyMs,
+        inputTokens: response.usage?.inputTokens,
+        outputTokens: response.usage?.outputTokens,
+        success: true,
+      });
     } catch (error) {
-      ModelRoutingHistory.getInstance().setLatency(routingId, Date.now() - routingStartedAt);
+      const latencyMs = Date.now() - routingStartedAt;
+      ModelRoutingHistory.getInstance().setLatency(routingId, latencyMs);
+      TelemetryStore.getInstance().record({
+        kind: 'llm.stream',
+        label: `${decision.provider}:${decision.model}`,
+        latencyMs,
+        success: false,
+        errorReason: error instanceof Error ? error.message : String(error),
+      });
       const err = error instanceof Error ? error : new Error(String(error));
       if (callbacks.onError) callbacks.onError(err);
       throw err;

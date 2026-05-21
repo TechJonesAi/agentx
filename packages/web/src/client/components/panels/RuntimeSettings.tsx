@@ -67,22 +67,30 @@ export function RuntimeSettings() {
     } finally { setBusy(false); }
   };
 
+  // NOTE: We use a <div> (not a <label>) on purpose. The global stylesheet
+  // applies text-transform:uppercase and display:block to all <label>
+  // elements, which broke this panel's layout. The actual click target is
+  // a wrapping <span> around the checkbox.
   const Toggle = ({
     label, value, onChange, hint,
   }: { label: string; value: boolean; onChange: (v: boolean) => void; hint?: string }) => (
-    <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', cursor: 'pointer', borderBottom: '1px solid var(--border-primary)' }}>
-      <div style={{ minWidth: 0, flex: '1 1 auto' }}>
-        <div style={{ fontSize: '12px', fontWeight: 600 }}>{label}</div>
-        {hint && <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>{hint}</div>}
+    <div
+      onClick={() => !busy && onChange(!value)}
+      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', cursor: busy ? 'wait' : 'pointer', borderBottom: '1px solid var(--border-primary)', gap: '16px', textTransform: 'none' }}
+    >
+      <div style={{ minWidth: 0, flex: '1 1 auto', textTransform: 'none' }}>
+        <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', textTransform: 'none' }}>{label}</div>
+        {hint && <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px', textTransform: 'none' }}>{hint}</div>}
       </div>
       <input
         type="checkbox"
         checked={value}
         disabled={busy}
         onChange={(e) => onChange(e.target.checked)}
-        style={{ flex: '0 0 auto', marginLeft: '8px' }}
+        onClick={(e) => e.stopPropagation()}
+        style={{ flex: '0 0 auto', width: '18px', height: '18px', cursor: busy ? 'wait' : 'pointer' }}
       />
-    </label>
+    </div>
   );
 
   return (

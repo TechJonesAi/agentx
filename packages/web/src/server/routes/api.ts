@@ -762,6 +762,81 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
           return;
         }
+        // Batch 5 — Telemetry surface (live perf metrics).
+        if (route === '/api/telemetry/recent' && method === 'GET') {
+          try {
+            const u = new URL(url, 'http://x');
+            const kind = u.searchParams.get('kind') ?? undefined;
+            const limit = Math.max(1, Math.min(500, Number(u.searchParams.get('limit') ?? '100')));
+            const s = (agent as unknown as { getTelemetryStore?: () => { recent(n?: number, k?: string): unknown[]; rollupByKind(): unknown[]; size(): number } }).getTelemetryStore?.();
+            sendJson(res, 200, {
+              available: !!s,
+              size: s?.size?.() ?? 0,
+              recent: s?.recent?.(limit, kind) ?? [],
+              rollup: s?.rollupByKind?.() ?? [],
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, size: 0, recent: [], rollup: [], error: String(e) });
+          }
+          return;
+        }
+
+        // Batch 5 — OCR endpoint. Accepts {imageBase64} and returns
+        // {text, confidence, languages, durationMs}. Honest unavailable
+        // status when tesseract.js can't be loaded.
+        if (route === '/api/vision/ocr' && method === 'POST') {
+          const t0 = Date.now();
+          let body: Record<string, unknown>;
+          try { body = await parseBody(req); } catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+          const imageBase64 = body['imageBase64'];
+          if (typeof imageBase64 !== 'string' || imageBase64.length < 20) {
+            sendJson(res, 400, { error: 'imageBase64 is required (data URL or raw base64)' });
+            return;
+          }
+          // Lazy import — keep boot fast on machines without tesseract.
+          let Tesseract: { recognize?: (data: string, lang?: string) => Promise<{ data: { text: string; confidence: number } }> } | null = null;
+          try { Tesseract = (await import('tesseract.js' as string)).default ?? (await import('tesseract.js' as string)); } catch (e) {
+            sendJson(res, 503, {
+              available: false,
+              reason: 'tesseract.js failed to load: ' + (e instanceof Error ? e.message : String(e)),
+              recovery: 'Run `pnpm add tesseract.js` in the web package and restart.',
+            });
+            return;
+          }
+          if (!Tesseract?.recognize) {
+            sendJson(res, 503, { available: false, reason: 'tesseract.js loaded but recognize() not found' });
+            return;
+          }
+          try {
+            const data = imageBase64.startsWith('data:') ? imageBase64 : `data:image/png;base64,${imageBase64}`;
+            const result = await Tesseract.recognize(data, 'eng');
+            const durationMs = Date.now() - t0;
+            const text = result.data.text.trim();
+            const confidence = Math.round((result.data.confidence ?? 0) * 100) / 100;
+            // Record telemetry
+            try {
+              const s = (agent as unknown as { getTelemetryStore?: () => { record(e: Record<string, unknown>): void } }).getTelemetryStore?.();
+              s?.record?.({ kind: 'ocr.extract', label: 'tesseract.js:eng', latencyMs: durationMs, success: true });
+            } catch { /* */ }
+            sendJson(res, 200, {
+              available: true,
+              text,
+              confidence,
+              languages: ['eng'],
+              durationMs,
+              charCount: text.length,
+            });
+          } catch (e) {
+            const durationMs = Date.now() - t0;
+            try {
+              const s = (agent as unknown as { getTelemetryStore?: () => { record(e: Record<string, unknown>): void } }).getTelemetryStore?.();
+              s?.record?.({ kind: 'ocr.extract', label: 'tesseract.js:eng', latencyMs: durationMs, success: false, errorReason: e instanceof Error ? e.message : String(e) });
+            } catch { /* */ }
+            sendJson(res, 500, { available: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // Batch 4 — Operator-trust surface. Returns the list of services
         // that are NOT currently fully operational, each with why/impact/
         // next-action/recovery-path. Built from live HealthMonitor +

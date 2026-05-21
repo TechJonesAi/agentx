@@ -64,6 +64,9 @@ export { decideRoute } from './observability/model-routing-engine.js';
 export type { RoutingInputs, RoutingDecision } from './observability/model-routing-engine.js';
 export { SCENARIOS as VALIDATION_SCENARIOS, runScenario, runAllScenarios } from './observability/validation-scenarios.js';
 export type { Scenario, ScenarioResult } from './observability/validation-scenarios.js';
+export { TelemetryStore } from './observability/telemetry-store.js';
+export type { TelemetryEntry, TelemetryRollup, TelemetryKind } from './observability/telemetry-store.js';
+export { safeFtsQuery } from './memory/fts-index-service.js';
 // Tier 2 batch B re-exports — needed by web routes for /api/mcp/* writes.
 // These are route-level config helpers; no MCP runtime instantiation here.
 export { loadMCPConfig, saveMCPConfig, validateServerConfig, DEFAULT_MCP_CONFIG } from './mcp/config.js';
