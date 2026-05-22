@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SessionResetManager } from '../../src/sessions/reset.js';
 import type { SessionEntry, SessionResetConfig } from '../../src/types.js';
 
@@ -28,26 +28,28 @@ describe('SessionResetManager', () => {
   let manager: SessionResetManager;
 
   describe('shouldReset - daily mode', () => {
+    // Pin the system clock to a known time AFTER the 4am reset hour so the
+    // "boundary crossed" assertions are deterministic regardless of the
+    // wall clock when CI happens to run. Without this the test was flaky
+    // whenever CI executed between midnight and 4am UTC.
     beforeEach(() => {
       manager = new SessionResetManager(makeConfig({ reset: { mode: 'daily', atHour: 4 } }));
+      vi.useFakeTimers();
+      // Pin to 2024-06-15 10:00:00 UTC — well after the 4am reset.
+      vi.setSystemTime(new Date('2024-06-15T10:00:00Z'));
     });
 
-    it('resets when daily boundary has been crossed', () => {
-      // Create an entry last updated yesterday at 3am, and current time is today at 5am
-      const yesterday3am = new Date();
-      yesterday3am.setDate(yesterday3am.getDate() - 1);
-      yesterday3am.setHours(3, 0, 0, 0);
+    afterEach(() => { vi.useRealTimers(); });
 
+    it('resets when daily boundary has been crossed', () => {
+      // Create an entry last updated yesterday at 3am, and current time is today at 10am.
+      const yesterday3am = new Date('2024-06-14T03:00:00Z');
       const entry = makeEntry(yesterday3am.toISOString());
       expect(manager.shouldReset(entry, 'dm', 'telegram')).toBe(true);
     });
 
     it('does not reset when updated today after reset hour', () => {
-      const todayAfterReset = new Date();
-      todayAfterReset.setHours(5, 0, 0, 0); // after 4am reset hour
-
-      // Only resets if now is after the hour but entry was before it
-      // If entry was also after, no reset
+      const todayAfterReset = new Date('2024-06-15T05:00:00Z'); // after 4am reset hour
       const entry = makeEntry(todayAfterReset.toISOString());
       expect(manager.shouldReset(entry, 'dm', 'telegram')).toBe(false);
     });
