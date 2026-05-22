@@ -213,6 +213,11 @@ export interface AgentLoopContext {
   checkpointStateProvider?: () => Record<string, unknown>;
   buildIntelligenceService?: any;
   personalizationService?: any;
+  /** Batch 7A — durable workflow store. When present, AgentLoopEngine
+   *  registers every loop run + lifecycle event for restart recovery and
+   *  dashboard surfacing. Optional so existing tests / standalone engine
+   *  use stay compatible. */
+  workflowRunStore?: import('../observability/workflow-run-store.js').WorkflowRunStore;
 }
 
 /**

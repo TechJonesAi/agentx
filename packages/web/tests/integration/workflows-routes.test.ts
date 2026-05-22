@@ -131,3 +131,31 @@ describe('POST /api/workflows/:loopId/pause + /resume', () => {
     expect(r.status).toBe(404);
   });
 });
+
+describe('POST /api/workflows/:loopId/reject — Batch 7A approval reject', () => {
+  it('marks the workflow failed with [rejected] prefix and preserves the audit trail', async () => {
+    const a = store.start({ goal: 'g' });
+    store.markAwaitingApproval(a.loopId, 'destructive db migration');
+    expect(store.get(a.loopId)!.state).toBe('awaiting_approval');
+
+    const r = await call(router, 'POST', `/api/workflows/${a.loopId}/reject`, { reason: 'too risky' });
+    expect(r.status).toBe(200);
+    expect(r.body['ok']).toBe(true);
+
+    const fresh = store.get(a.loopId)!;
+    expect(fresh.state).toBe('failed');
+    expect(fresh.failureReason).toContain('rejected');
+    expect(fresh.failureReason).toContain('too risky');
+
+    // Audit trail preserved: approval_request stays in event timeline.
+    const events = store.getEvents(a.loopId);
+    const kinds = events.map(e => e.eventKind);
+    expect(kinds).toContain('approval_request');
+    expect(kinds).toContain('failure');
+  });
+
+  it('returns 404 for unknown id', async () => {
+    const r = await call(router, 'POST', '/api/workflows/does-not-exist/reject', {});
+    expect(r.status).toBe(404);
+  });
+});

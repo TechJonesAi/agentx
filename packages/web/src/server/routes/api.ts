@@ -804,6 +804,30 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           }
           return;
         }
+        // Batch 7A — explicit reject for awaiting_approval runs.
+        // Distinct from pause: reject permanently fails the run with a
+        // record in the timeline so the operator decision is auditable.
+        if (route.match(/^\/api\/workflows\/[^/]+\/reject$/) && method === 'POST') {
+          const loopId = decodeURIComponent(route.substring('/api/workflows/'.length).replace('/reject', ''));
+          let body: Record<string, unknown> = {};
+          try { body = await parseBody(req); } catch { /* */ }
+          try {
+            const s = (agent as unknown as { getWorkflowRunStore?: () => { get(id: string): { state: string } | null; markFailure(id: string, r: string, a?: string): void } }).getWorkflowRunStore?.();
+            if (!s) { sendJson(res, 503, { ok: false, error: 'workflow store unavailable' }); return; }
+            const run = s.get(loopId);
+            if (!run) { sendJson(res, 404, { ok: false, error: 'workflow not found' }); return; }
+            const reason = typeof body['reason'] === 'string' ? body['reason'] as string : 'rejected by operator';
+            // Mark as failed with the operator's rejection captured in
+            // failure_reason. The event timeline keeps the prior
+            // approval_request event for audit.
+            s.markFailure(loopId, `[rejected] ${reason}`);
+            sendJson(res, 200, { ok: true });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         if (route.match(/^\/api\/workflows\/[^/]+\/resume$/) && method === 'POST') {
           const loopId = decodeURIComponent(route.substring('/api/workflows/'.length).replace('/resume', ''));
           let body: Record<string, unknown> = {};

@@ -155,6 +155,29 @@ export class AgentLoopEngine {
       this.context.stateStore.addActiveLoop(loopId, state);
     }
 
+    // Batch 7A — durable workflow registration. Every loop becomes a row
+    // in workflow_runs so it survives restart and surfaces on the dashboard.
+    // Wrapped in try/catch — durability is best-effort; an engine that
+    // can't write to SQL must NOT fail the loop.
+    const wrs = this.context.workflowRunStore;
+    if (wrs) {
+      try {
+        wrs.start({
+          loopId,
+          goal: goal.description,
+          metadata: { sessionId: goal.context?.sessionId, projectId: goal.context?.projectId },
+        });
+      } catch (e) {
+        log.warn({ loopId, error: e instanceof Error ? e.message : String(e) }, 'WorkflowRunStore.start failed (non-fatal)');
+      }
+    }
+    // Helper used at every state.status transition below — best-effort
+    // phase recording, ignores DB errors.
+    const recordPhase = (phase: string): void => {
+      if (!wrs) return;
+      try { wrs.updatePhase(loopId, phase); } catch { /* */ }
+    };
+
     // Flag: set true when a delegation path handles the goal,
     // so the standard plan/execute loop is skipped but finally{} still runs.
     let delegated = false;
@@ -340,7 +363,7 @@ export class AgentLoopEngine {
       }
 
       // === PLANNING STAGE ===
-      state.status = 'planning';
+      state.status = 'planning'; recordPhase('planning');
       state.plan = await this.planner.generatePlan(goal);
 
       // Update runtime state
@@ -358,13 +381,13 @@ export class AgentLoopEngine {
       // === EXECUTION LOOP ===
       while (state.currentStep < state.plan.tasks.length) {
         if (this.shouldStop(state)) {
-          state.status = 'stopped';
+          state.status = 'stopped'; recordPhase('stopped');
           break;
         }
 
         const task = state.plan.tasks[state.currentStep];
         state.currentStep++;
-        state.status = 'executing';
+        state.status = 'executing'; recordPhase('executing');
 
         // Execute task
         const result = await this.executor.executeTask(task);
@@ -394,7 +417,7 @@ export class AgentLoopEngine {
         });
 
         // === OBSERVATION STAGE ===
-        state.status = 'observing';
+        state.status = 'observing'; recordPhase('observing');
         const observation: AgentLoopObservation = {
           stepNumber: state.currentStep,
           taskId: task.id,
@@ -411,7 +434,7 @@ export class AgentLoopEngine {
         state.observations.push(observation);
 
         // === REFLECTION STAGE ===
-        state.status = 'reflecting';
+        state.status = 'reflecting'; recordPhase('reflecting');
         const reflection = await this.reflector.reflect(observation);
         state.reflections.push(reflection);
 
@@ -432,7 +455,7 @@ export class AgentLoopEngine {
         }
 
         if (reflection.recommendedAdjustments && reflection.recommendedAdjustments.length > 0) {
-          state.status = 'adjusting';
+          state.status = 'adjusting'; recordPhase('adjusting');
           const adjustment: AgentLoopAdjustment = {
             stepNumber: state.currentStep,
             reason: reflection.recommendedAdjustments[0],
@@ -504,6 +527,19 @@ export class AgentLoopEngine {
         timestamp: endTime,
       });
 
+      // Batch 7A — durable persistence of loop outcome.
+      if (wrs) {
+        try {
+          if (loopSuccess) {
+            wrs.markSuccess(loopId, state.finalOutcome.summary);
+          } else {
+            wrs.markFailure(loopId, `${failedStepCount} step(s) failed`);
+          }
+        } catch (e) {
+          log.warn({ loopId, error: e instanceof Error ? e.message : String(e) }, 'WorkflowRunStore.markSuccess/Failure failed (non-fatal)');
+        }
+      }
+
       log.info(
         { loopId, success: true, duration: state.totalDuration, steps: state.currentStep },
         'Agent loop completed'
@@ -513,6 +549,15 @@ export class AgentLoopEngine {
       const endTime = Date.now();
       state.totalDuration = endTime - startTime;
       state.status = 'failed';
+
+      // Batch 7A — record the failure in workflow_runs.
+      if (wrs) {
+        try {
+          wrs.markFailure(loopId, error instanceof Error ? error.message : String(error));
+        } catch (e) {
+          log.warn({ loopId, error: e instanceof Error ? e.message : String(e) }, 'WorkflowRunStore.markFailure failed (non-fatal)');
+        }
+      }
 
       state.finalOutcome = {
         success: false,
@@ -542,6 +587,29 @@ export class AgentLoopEngine {
       // Move from active to history in all state stores
       this.loopHistory.push(state);
       this.activeLoops.delete(loopId);
+
+      // Batch 7A — durable persistence of the final outcome. This runs
+      // for EVERY exit path (SUGGEST_ONLY, multi-agent delegation,
+      // builder delegation, standard plan-execute, caught error) so the
+      // workflow_runs row is guaranteed terminal-state before we leave.
+      // Guarded by !wrs and try/catch so durability stays best-effort.
+      if (wrs) {
+        try {
+          // Only transition the row if it's still in a non-terminal state
+          // (the main-loop success/failure branches may have already done it).
+          const current = wrs.get(loopId);
+          if (current && (current.state === 'running' || current.state === 'paused' || current.state === 'awaiting_approval')) {
+            const succeeded = state.status === 'completed' && state.finalOutcome?.success === true;
+            if (succeeded) {
+              wrs.markSuccess(loopId, state.finalOutcome?.summary ?? 'completed');
+            } else {
+              wrs.markFailure(loopId, state.finalOutcome?.summary ?? `status=${state.status}`);
+            }
+          }
+        } catch (e) {
+          log.warn({ loopId, error: e instanceof Error ? e.message : String(e) }, 'WorkflowRunStore finally durability flush failed (non-fatal)');
+        }
+      }
 
       // Persist final state (status, finalOutcome, duration) before moving to history
       runtimeStateStore.updateActiveLoop(loopId, {
@@ -834,6 +902,8 @@ export class AgentLoopEngine {
     const state = this.activeLoops.get(loopId);
     if (state) {
       state.status = 'stopped';
+      // Batch 7A — persist the stop transition if WorkflowRunStore is wired.
+      try { this.context.workflowRunStore?.markPaused(loopId, 'stopped via stopLoop()'); } catch { /* */ }
       this.activeLoops.delete(loopId);
       this.loopHistory.push(state);
       log.info({ loopId }, 'Loop stopped');

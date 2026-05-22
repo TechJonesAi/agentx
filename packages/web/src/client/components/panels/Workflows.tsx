@@ -9,6 +9,15 @@ interface WorkflowRun {
   failureReason: string | null;
   startedAt: number;
   updatedAt: number;
+  repairAction?: string | null;
+}
+
+interface WorkflowEvent {
+  eventId: string;
+  loopId: string;
+  eventKind: string;
+  detail: string | null;
+  ts: number;
 }
 
 interface Payload {
@@ -38,6 +47,8 @@ export function Workflows() {
   const [data, setData] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [events, setEvents] = useState<Record<string, WorkflowEvent[]>>({});
 
   const load = async () => {
     try {
@@ -56,16 +67,31 @@ export function Workflows() {
     return () => clearInterval(iv);
   }, []);
 
-  const action = async (loopId: string, op: 'pause' | 'resume') => {
+  const action = async (loopId: string, op: 'pause' | 'resume' | 'reject') => {
     setBusy(true);
     try {
+      const body = op === 'reject'
+        ? { reason: prompt('Rejection reason for audit log?', 'rejected by operator') ?? 'rejected by operator' }
+        : {};
       await fetch(`/api/workflows/${encodeURIComponent(loopId)}/${op}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify(body),
       });
       await load();
     } finally { setBusy(false); }
+  };
+
+  const toggleTimeline = async (loopId: string) => {
+    if (expanded === loopId) { setExpanded(null); return; }
+    setExpanded(loopId);
+    if (events[loopId]) return; // cached
+    try {
+      const r = await fetch(`/api/workflows/${encodeURIComponent(loopId)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      setEvents((prev) => ({ ...prev, [loopId]: d.events ?? [] }));
+    } catch { /* silent */ }
   };
 
   return (
@@ -110,20 +136,26 @@ export function Workflows() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '320px', overflowY: 'auto' }}>
-              {data.runs.map((r) => (
-                <div key={r.loopId} style={{ padding: '8px 10px', background: 'var(--bg-primary)', borderRadius: '4px', borderLeft: `3px solid ${STATE_COLOR[r.state] ?? '#888'}` }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px' }}>
-                    <code style={{ fontFamily: 'monospace', fontSize: '11px', color: 'var(--text-secondary)' }}>{r.loopId.slice(0, 24)}</code>
-                    <span style={{ fontSize: '10px', color: STATE_COLOR[r.state] ?? '#888', fontWeight: 600 }}>{r.state}</span>
-                  </div>
-                  <div style={{ fontSize: '12px', marginTop: '2px', color: 'var(--text-primary)' }}>{r.goal.slice(0, 100)}</div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                    {r.executionPhase && <>phase={r.executionPhase} · </>}
-                    retries={r.retryCount}
-                    {r.failureReason && <> · <span style={{ color: '#f85444' }}>{r.failureReason.slice(0, 60)}</span></>}
-                  </div>
-                  {(r.state === 'running' || r.state === 'paused') && (
-                    <div style={{ marginTop: '6px', display: 'flex', gap: '4px' }}>
+              {data.runs.map((r) => {
+                const evList = events[r.loopId];
+                const isExpanded = expanded === r.loopId;
+                return (
+                  <div key={r.loopId} style={{ padding: '8px 10px', background: 'var(--bg-primary)', borderRadius: '4px', borderLeft: `3px solid ${STATE_COLOR[r.state] ?? '#888'}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px' }}>
+                      <code style={{ fontFamily: 'monospace', fontSize: '11px', color: 'var(--text-secondary)' }}>{r.loopId.slice(0, 24)}</code>
+                      <span style={{ fontSize: '10px', color: STATE_COLOR[r.state] ?? '#888', fontWeight: 600 }}>{r.state}</span>
+                    </div>
+                    <div style={{ fontSize: '12px', marginTop: '2px', color: 'var(--text-primary)' }}>{r.goal.slice(0, 100)}</div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                      {r.executionPhase && <>phase={r.executionPhase} · </>}
+                      retries={r.retryCount}
+                      {r.failureReason && <> · <span style={{ color: '#f85444' }}>{r.failureReason.slice(0, 60)}</span></>}
+                    </div>
+                    <div style={{ marginTop: '6px', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                      <button onClick={() => toggleTimeline(r.loopId)}
+                        style={{ fontSize: '10px', padding: '2px 6px', background: 'transparent', border: '1px solid var(--border-primary)', borderRadius: '3px', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                        {isExpanded ? 'Hide timeline' : 'View timeline'}
+                      </button>
                       {r.state === 'running' && (
                         <button onClick={() => action(r.loopId, 'pause')} disabled={busy}
                           style={{ fontSize: '10px', padding: '2px 6px', background: 'transparent', border: '1px solid #d2992266', borderRadius: '3px', color: '#d29922', cursor: 'pointer' }}>
@@ -136,10 +168,41 @@ export function Workflows() {
                           Resume
                         </button>
                       )}
+                      {r.state === 'awaiting_approval' && (
+                        <>
+                          <button onClick={() => action(r.loopId, 'resume')} disabled={busy}
+                            style={{ fontSize: '10px', padding: '2px 6px', background: 'transparent', border: '1px solid #3fb95066', borderRadius: '3px', color: '#3fb950', cursor: 'pointer' }}>
+                            Approve {r.repairAction ? `(${r.repairAction.slice(0, 28)})` : ''}
+                          </button>
+                          <button onClick={() => action(r.loopId, 'reject')} disabled={busy}
+                            style={{ fontSize: '10px', padding: '2px 6px', background: 'transparent', border: '1px solid #f8514966', borderRadius: '3px', color: '#f85149', cursor: 'pointer' }}>
+                            Reject
+                          </button>
+                        </>
+                      )}
                     </div>
-                  )}
-                </div>
-              ))}
+                    {isExpanded && (
+                      <div style={{ marginTop: '8px', padding: '6px 8px', background: 'var(--bg-secondary)', borderRadius: '4px', fontSize: '10px' }}>
+                        {!evList ? (
+                          <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>Loading timeline…</div>
+                        ) : evList.length === 0 ? (
+                          <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>No events recorded.</div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', maxHeight: '180px', overflowY: 'auto' }}>
+                            {evList.map((e) => (
+                              <div key={e.eventId} style={{ display: 'flex', gap: '8px' }}>
+                                <span style={{ color: 'var(--text-secondary)', minWidth: '60px' }}>{new Date(e.ts).toLocaleTimeString()}</span>
+                                <span style={{ color: 'var(--accent-cyan)', minWidth: '110px' }}>{e.eventKind}</span>
+                                <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.detail ?? ''}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </>

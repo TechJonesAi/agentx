@@ -968,6 +968,39 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       },
     });
 
+    // 16) Engine Integration (Batch 7A) — confirms AgentLoopEngine is wired
+    //     to WorkflowRunStore so future loop runs will persist.
+    monitor.registerProbe({
+      name: 'Engine Integration',
+      run: async () => {
+        const engineCtx = this._agentLoopEngine
+          ? (this._agentLoopEngine as unknown as { context?: { workflowRunStore?: unknown } }).context
+          : null;
+        if (!this._agentLoopEngine) {
+          return { status: 'degraded', detail: 'AgentLoopEngine not yet instantiated (lazy)' };
+        }
+        if (!engineCtx?.workflowRunStore) {
+          return { status: 'failed', detail: 'AgentLoopEngine has no workflowRunStore — loops will not be durable' };
+        }
+        return { status: 'ok', detail: 'AgentLoopEngine ↔ WorkflowRunStore wired' };
+      },
+    });
+
+    // 17) Approval Queue Integrity (Batch 7A) — confirms the workflow store
+    //     can return pending-approval runs without throwing.
+    monitor.registerProbe({
+      name: 'Approval Queue',
+      run: async () => {
+        try {
+          const s = WorkflowRunStore.get(this.db);
+          const list = s.list({ state: 'awaiting_approval', limit: 10 });
+          return { status: 'ok', detail: `${list.length} workflow(s) awaiting approval` };
+        } catch (e) {
+          return { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
     // Run a probe cycle every 60s. Use 15s for the first 5 minutes for
     // faster boot-time signal, then settle into 60s cadence.
     monitor.start(60000);
@@ -1370,6 +1403,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         autonomyGate: this._autonomyGate,
         checkpointManager: this._checkpointManager,
         experienceStore: this.getLoopExperienceStore(),
+        // Batch 7A — every loop now persists to workflow_runs for restart
+        // recovery + dashboard surfacing.
+        workflowRunStore: this.getWorkflowRunStore(),
       });
       // Optional capability setters — strengthen the engine when these
       // subsystems are wired. Each setter is a no-op when its dep is null.
