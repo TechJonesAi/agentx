@@ -31,6 +31,12 @@ afterEach(() => {
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
 }, 60_000);
 
+// Windows IO budget — better-sqlite3 INSERTs are ~30× slower on Windows
+// CI runners (each create takes ~300ms vs ~10ms on Unix). The window
+// test inserts 40 rows and exceeded the default 10s testTimeout. Bump
+// to the existing IO budget the project uses for similar tests.
+const SLOW_IO_TIMEOUT_MS = 60_000;
+
 describe('WorkflowRunStore.recentReliability', () => {
   it('returns null when fewer than minSamples completed runs exist', () => {
     for (let i = 0; i < 4; i++) {
@@ -71,7 +77,7 @@ describe('WorkflowRunStore.recentReliability', () => {
     const rel = store.recentReliability({ window: 10, minSamples: 5 });
     expect(rel?.totalCompleted).toBe(10);
     expect(rel?.successRate).toBe(1);
-  });
+  }, SLOW_IO_TIMEOUT_MS);
 
   it('counts interrupted_by_restart as a failure (terminal non-success)', () => {
     const a = store.start({ goal: 'a' });
