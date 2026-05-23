@@ -116,6 +116,8 @@ import { decideRoute, type RoutingDecision } from './observability/model-routing
 import { SCENARIOS as _VALIDATION_SCENARIOS } from './observability/validation-scenarios.js';
 import { TelemetryStore } from './observability/telemetry-store.js';
 import { WorkflowRunStore } from './observability/workflow-run-store.js';
+import { ProviderBenchmarkStore } from './observability/provider-benchmark-store.js';
+import { OmlxProvider } from './llm/omlx.js';
 import { ActionEngine } from './action-engine/index.js';
 import { RealAutomationPolicyService } from './services/automation-policy.js';
 import { RealAutomationRunStore } from './services/automation-run-store.js';
@@ -952,6 +954,38 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       },
     });
 
+    // 15b) oMLX Runtime — pings the configured local endpoint /v1/models
+    //      with a tight timeout. Honest degraded states for: not
+    //      configured (env var absent), non-localhost URL (illegal),
+    //      reachable but no models, unreachable. NEVER reaches out to
+    //      a non-localhost endpoint — the provider constructor itself
+    //      throws on non-local URLs.
+    monitor.registerProbe({
+      name: 'oMLX Runtime',
+      run: async () => {
+        const endpoint = process.env['AGENTX_OMLX_ENDPOINT'];
+        if (!endpoint) {
+          return { status: 'degraded', detail: 'AGENTX_OMLX_ENDPOINT not set — oMLX is opt-in' };
+        }
+        // Reject non-localhost up-front to enforce the localOnly guarantee.
+        try { OmlxProvider.assertLocalhostOnly(endpoint); }
+        catch (e) { return { status: 'failed', detail: e instanceof Error ? e.message : String(e) }; }
+
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2500);
+        try {
+          const r = await fetch(`${endpoint.replace(/\/+$/, '')}/v1/models`, { signal: ctrl.signal });
+          if (!r.ok) return { status: 'failed', detail: `oMLX ${endpoint} /v1/models returned ${r.status}` };
+          const data = await r.json() as { data?: unknown[] };
+          const n = Array.isArray(data.data) ? data.data.length : 0;
+          if (n === 0) return { status: 'degraded', detail: `${endpoint} reachable, 0 models loaded` };
+          return { status: 'ok', detail: `${endpoint} · ${n} model(s) loaded` };
+        } catch (e) {
+          return { status: 'degraded', detail: `${endpoint} unreachable: ${e instanceof Error ? e.message : String(e)}` };
+        } finally { clearTimeout(t); }
+      },
+    });
+
     // 15) DB Integrity — fast PRAGMA integrity_check.
     monitor.registerProbe({
       name: 'DB Integrity',
@@ -1360,6 +1394,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   getRetrievalOutcomeStore(): RetrievalOutcomeStore { return RetrievalOutcomeStore.getInstance(); }
   getTelemetryStore(): TelemetryStore { return TelemetryStore.getInstance(); }
   getWorkflowRunStore(): WorkflowRunStore { return WorkflowRunStore.get(this.db); }
+  getProviderBenchmarkStore(): ProviderBenchmarkStore { return ProviderBenchmarkStore.get(this.db); }
 
   /** Snapshot of the currently-active model + provider. Used by the
    *  dashboard "Active LLM Routing" panel and Phase 4 truth surface. */

@@ -19,6 +19,7 @@ export function runCognitiveMemoryMigrations(db: Database.Database): MigrationRe
     { id: '006_document_identity', sql: fs.readFileSync(path.join(import.meta.dirname, '006_document_identity.sql'), 'utf-8') },
     { id: '007_fts_contentless',   sql: fs.readFileSync(path.join(import.meta.dirname, '007_fts_contentless.sql'),   'utf-8') },
     { id: '008_workflow_runs',     sql: fs.readFileSync(path.join(import.meta.dirname, '008_workflow_runs.sql'),     'utf-8') },
+    { id: '009_provider_benchmarks', sql: fs.readFileSync(path.join(import.meta.dirname, '009_provider_benchmarks.sql'), 'utf-8') },
   ];
 
   const schemaTable = 'schema_migrations_cognitive';

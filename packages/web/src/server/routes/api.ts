@@ -865,6 +865,118 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // Batch 9 — oMLX local provider status. Honest report across:
+        //   - env var unset → degraded with recovery hint
+        //   - non-localhost endpoint → blocked (privacy violation)
+        //   - reachable + N models loaded → available: true
+        // The endpoint is hard-validated through OmlxProvider's static
+        // assertLocalhostOnly() so misconfiguration cannot leak out.
+        if (route === '/api/providers/omlx/status' && method === 'GET') {
+          try {
+            const endpoint = process.env['AGENTX_OMLX_ENDPOINT'];
+            if (!endpoint) {
+              sendJson(res, 200, {
+                available: false,
+                endpoint: null,
+                reason: 'AGENTX_OMLX_ENDPOINT not set — oMLX provider is opt-in. Ollama remains the default.',
+                recovery: 'Install Apple MLX (https://github.com/ml-explore/mlx) + an OpenAI-compatible server (e.g. mlx_lm.server), then set AGENTX_OMLX_ENDPOINT=http://localhost:8080 and restart.',
+              });
+              return;
+            }
+            const mod = await import('@agentx/core') as unknown as { OmlxProvider: { assertLocalhostOnly(e: string): void } };
+            try { mod.OmlxProvider.assertLocalhostOnly(endpoint); }
+            catch (e) {
+              sendJson(res, 200, {
+                available: false,
+                endpoint,
+                blocked: true,
+                reason: e instanceof Error ? e.message : String(e),
+                recovery: 'Set AGENTX_OMLX_ENDPOINT to a localhost address (localhost / 127.0.0.1 / ::1 / 0.0.0.0). Non-local endpoints are rejected to preserve localOnly guarantees.',
+              });
+              return;
+            }
+            // Probe /v1/models with a 2.5s timeout.
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 2500);
+            try {
+              const r = await fetch(`${endpoint.replace(/\/+$/, '')}/v1/models`, { signal: ctrl.signal });
+              if (!r.ok) {
+                sendJson(res, 200, { available: false, endpoint, reason: `endpoint returned ${r.status} ${r.statusText}` });
+                return;
+              }
+              const data = await r.json() as { data?: Array<{ id?: string }> };
+              const list = Array.isArray(data.data) ? data.data : [];
+              sendJson(res, 200, {
+                available: list.length > 0,
+                endpoint,
+                models: list.map((m) => m?.id).filter((m): m is string => typeof m === 'string'),
+                modelCount: list.length,
+                offlineVerified: true,
+                ...(list.length === 0 ? { reason: 'endpoint reachable but no models loaded' } : {}),
+              });
+            } catch (e) {
+              sendJson(res, 200, { available: false, endpoint, reason: `endpoint unreachable: ${e instanceof Error ? e.message : String(e)}` });
+            } finally { clearTimeout(t); }
+          } catch (e) {
+            sendJson(res, 500, { available: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
+        // Batch 9 — provider benchmark history + comparison.
+        if (route === '/api/providers/benchmarks' && method === 'GET') {
+          try {
+            const u = new URL(url, 'http://x');
+            const taskCategory = u.searchParams.get('taskCategory') ?? undefined;
+            const provider = u.searchParams.get('provider') ?? undefined;
+            const limit = Math.max(1, Math.min(500, Number(u.searchParams.get('limit') ?? '100')));
+            const s = (agent as unknown as { getProviderBenchmarkStore?: () => { recent(n: number, tc?: string, p?: string): unknown[]; taskCategories(): string[]; size(): number } }).getProviderBenchmarkStore?.();
+            sendJson(res, 200, {
+              available: !!s,
+              size: s?.size?.() ?? 0,
+              taskCategories: s?.taskCategories?.() ?? [],
+              benchmarks: s?.recent?.(limit, taskCategory, provider) ?? [],
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, error: String(e) });
+          }
+          return;
+        }
+        if (route === '/api/providers/benchmarks' && method === 'POST') {
+          let body: Record<string, unknown>;
+          try { body = await parseBody(req); } catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+          const required = ['taskCategory', 'provider', 'model', 'score'];
+          for (const k of required) {
+            if (body[k] === undefined || body[k] === null) {
+              sendJson(res, 400, { error: `field '${k}' is required` });
+              return;
+            }
+          }
+          try {
+            const s = (agent as unknown as { getProviderBenchmarkStore?: () => { record(b: Record<string, unknown>): unknown } }).getProviderBenchmarkStore?.();
+            if (!s) { sendJson(res, 503, { ok: false, error: 'benchmark store unavailable' }); return; }
+            const row = s.record(body);
+            sendJson(res, 200, { ok: true, row });
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+        if (route.startsWith('/api/providers/comparison/') && method === 'GET') {
+          const taskCategory = decodeURIComponent(route.substring('/api/providers/comparison/'.length));
+          try {
+            const u = new URL(url, 'http://x');
+            const window = Number(u.searchParams.get('window') ?? '20');
+            const minSamples = Number(u.searchParams.get('minSamples') ?? '3');
+            const s = (agent as unknown as { getProviderBenchmarkStore?: () => { compare(tc: string, o?: { window?: number; minSamples?: number }): unknown } }).getProviderBenchmarkStore?.();
+            if (!s) { sendJson(res, 503, { available: false }); return; }
+            sendJson(res, 200, { available: true, comparison: s.compare(taskCategory, { window, minSamples }) });
+          } catch (e) {
+            sendJson(res, 500, { available: false, error: e instanceof Error ? e.message : String(e) });
+          }
+          return;
+        }
+
         // Batch 8A — TTS backend status. Returns the configured local
         // backend (piper / kokoro), whether the binary is reachable,
         // and the recovery instructions if not. Honest report only —

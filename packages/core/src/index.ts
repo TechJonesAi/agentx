@@ -69,6 +69,10 @@ export type { TelemetryEntry, TelemetryRollup, TelemetryKind } from './observabi
 export { safeFtsQuery } from './memory/fts-index-service.js';
 export { WorkflowRunStore } from './observability/workflow-run-store.js';
 export type { WorkflowRun, WorkflowEvent, WorkflowState, WorkflowEventKind } from './observability/workflow-run-store.js';
+export { ProviderBenchmarkStore } from './observability/provider-benchmark-store.js';
+export type { BenchmarkInput, BenchmarkRow, ProviderComparison } from './observability/provider-benchmark-store.js';
+export { OmlxProvider } from './llm/omlx.js';
+export type { OmlxOptions } from './llm/omlx.js';
 // Tier 2 batch B re-exports — needed by web routes for /api/mcp/* writes.
 // These are route-level config helpers; no MCP runtime instantiation here.
 export { loadMCPConfig, saveMCPConfig, validateServerConfig, DEFAULT_MCP_CONFIG } from './mcp/config.js';
