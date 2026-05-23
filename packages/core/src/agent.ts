@@ -2168,6 +2168,12 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       // Batch 6D — telemetry-driven model demotion. perModelHealth feeds
       // p95 latency + success rate so routing prefers healthy models.
       perModelHealth: TelemetryStore.getInstance().perModelHealth(),
+      // Batch 8E — workflow-success-aware annotation. Surfaces recent
+      // autonomous run health in the routing decision reason so the
+      // operator dashboard shows whether the runtime is healthy.
+      workflowReliability: (() => {
+        try { return WorkflowRunStore.get(this.db).recentReliability(); } catch { return null; }
+      })(),
     });
     const routingId = ModelRoutingHistory.getInstance().record({
       taskType: decision.taskType,

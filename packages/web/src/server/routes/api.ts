@@ -865,6 +865,90 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // Batch 8A — TTS backend status. Returns the configured local
+        // backend (piper / kokoro), whether the binary is reachable,
+        // and the recovery instructions if not. Honest report only —
+        // never silently falls back to a hosted endpoint when localOnly
+        // is set. Future batches will add the actual synthesis route
+        // once a binary is installed and wired.
+        if (route === '/api/tts/status' && method === 'GET') {
+          const backend = process.env['AGENTX_TTS_LOCAL_BACKEND']?.toLowerCase() ?? null;
+          const localOnly = (() => {
+            try {
+              const s = (agent as unknown as { getRuntimeSettings?: () => { getKey(k: string): unknown } }).getRuntimeSettings?.();
+              return s?.getKey?.('localOnly') === true;
+            } catch { return false; }
+          })();
+          if (!backend) {
+            sendJson(res, 200, {
+              available: false,
+              backend: null,
+              localOnly,
+              reason: 'No local TTS backend configured.',
+              recovery: 'Install Piper (https://github.com/rhasspy/piper) or Kokoro, then set AGENTX_TTS_LOCAL_BACKEND=piper (or kokoro) and restart the server.',
+              note: localOnly
+                ? 'localOnly is ON — hosted TTS is blocked. Voice synthesis will return 503 until a local backend is installed.'
+                : 'localOnly is OFF — the dashboard can still use hosted TTS via the existing /api/voice/synth route; install a local backend to make synthesis truly offline.',
+            });
+            return;
+          }
+          if (backend !== 'piper' && backend !== 'kokoro') {
+            sendJson(res, 200, {
+              available: false,
+              backend,
+              localOnly,
+              reason: `AGENTX_TTS_LOCAL_BACKEND='${backend}' is not a recognized local backend (expected 'piper' or 'kokoro').`,
+              recovery: `Set AGENTX_TTS_LOCAL_BACKEND=piper or AGENTX_TTS_LOCAL_BACKEND=kokoro and restart.`,
+            });
+            return;
+          }
+          // Probe binary presence on PATH without invoking it.
+          const binEnv = backend === 'piper'
+            ? (process.env['AGENTX_TTS_PIPER_BIN'] ?? 'piper')
+            : (process.env['AGENTX_TTS_KOKORO_BIN'] ?? 'kokoro');
+          let binaryReachable = false;
+          let binaryDetail = '';
+          try {
+            const fsP = await import('node:fs/promises');
+            const { execFile } = await import('node:child_process');
+            const { promisify } = await import('node:util');
+            const execFileP = promisify(execFile);
+            // First: if the env points at an absolute path, just stat it.
+            if (binEnv.startsWith('/') || binEnv.match(/^[A-Z]:\\/i)) {
+              const stat = await fsP.stat(binEnv).catch(() => null);
+              binaryReachable = !!stat?.isFile();
+              binaryDetail = binaryReachable ? `binary at ${binEnv}` : `not found at ${binEnv}`;
+            } else {
+              // Otherwise: try `<binary> --version` with a 1s timeout.
+              await execFileP(binEnv, ['--version'], { timeout: 1500 });
+              binaryReachable = true;
+              binaryDetail = `${binEnv} --version succeeded`;
+            }
+          } catch (e) {
+            binaryDetail = e instanceof Error ? e.message : String(e);
+          }
+          if (!binaryReachable) {
+            sendJson(res, 200, {
+              available: false,
+              backend,
+              binary: binEnv,
+              localOnly,
+              reason: `Local backend '${backend}' is configured but the binary is not reachable: ${binaryDetail}`,
+              recovery: `Install the ${backend} binary and ensure it is on PATH, or set AGENTX_TTS_${backend.toUpperCase()}_BIN to its absolute path. Restart the server.`,
+            });
+            return;
+          }
+          sendJson(res, 200, {
+            available: true,
+            backend,
+            binary: binEnv,
+            localOnly,
+            detail: binaryDetail,
+            offlineVerified: true,
+          });
+          return;
+        }
+
         // Batch 5 — OCR endpoint. Accepts {imageBase64} and returns
         // {text, confidence, languages, durationMs}. Honest unavailable
         // status when tesseract.js can't be loaded.

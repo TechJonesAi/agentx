@@ -200,6 +200,24 @@ export class WorkflowRunStore {
     return incomplete.length;
   }
 
+  /** Batch 8E — workflow-success-aware routing input.
+   *  Computes a recent-window success rate from terminal workflow_runs
+   *  rows (succeeded vs failed/interrupted). Returns null when there
+   *  aren't enough completed runs to be statistically meaningful. */
+  recentReliability(opts: { window?: number; minSamples?: number } = {}): { totalCompleted: number; successRate: number } | null {
+    const window = Math.max(1, Math.min(500, opts.window ?? 50));
+    const minSamples = Math.max(1, opts.minSamples ?? 5);
+    const rows = this.db.prepare(`
+      SELECT state FROM workflow_runs
+      WHERE state IN ('succeeded', 'failed', 'interrupted_by_restart')
+      ORDER BY started_at DESC
+      LIMIT ?
+    `).all(window) as Array<{ state: string }>;
+    if (rows.length < minSamples) return null;
+    const successes = rows.filter((r) => r.state === 'succeeded').length;
+    return { totalCompleted: rows.length, successRate: successes / rows.length };
+  }
+
   /** Summary counts by state — feeds the Workflows dashboard panel. */
   summary(): Record<WorkflowState, number> {
     const rows = this.db.prepare(`SELECT state, COUNT(*) AS n FROM workflow_runs GROUP BY state`).all() as Array<{ state: string; n: number }>;

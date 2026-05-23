@@ -39,6 +39,12 @@ export interface RoutingInputs {
   slowThresholdMs?: number;
   /** Minimum total calls before demotion is considered. Default 5. */
   minCallsForDemotion?: number;
+  /** Batch 8E — workflow-success-aware routing input. When recent
+   *  autonomous workflow success rate is low, the engine annotates
+   *  the decision reason so the operator sees that the runtime is
+   *  currently struggling. Future batches may use this to bias
+   *  toward smaller / faster models. */
+  workflowReliability?: { totalCompleted: number; successRate: number } | null;
 }
 
 export interface RoutingDecision {
@@ -159,12 +165,20 @@ export function decideRoute(inputs: RoutingInputs): RoutingDecision {
     }
   }
 
+  // Batch 8E — append a workflow-success annotation when the data is
+  // available so the operator sees runtime-level health in the routing
+  // reason. This is informational only; it does not change which model
+  // is chosen.
+  const baseReason = inputs.reliabilityAware
+    ? `default routing (reliability-aware mode on) for task '${t}'`
+    : `default routing for task '${t}'`;
+  const reasonWithWf = inputs.workflowReliability
+    ? `${baseReason} · workflow recent success ${Math.round(inputs.workflowReliability.successRate * 100)}% over ${inputs.workflowReliability.totalCompleted}`
+    : baseReason;
   return {
     model: inputs.defaultModel,
     provider: inputs.defaultProvider,
-    reason: inputs.reliabilityAware
-      ? `default routing (reliability-aware mode on) for task '${t}'`
-      : `default routing for task '${t}'`,
+    reason: reasonWithWf,
     pinUsed: false,
     fallbackChain,
     taskType: t,

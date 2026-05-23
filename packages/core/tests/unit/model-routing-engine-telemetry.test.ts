@@ -80,6 +80,20 @@ describe('decideRoute — telemetry demotion', () => {
     expect(d.model).toBe('slow');
   });
 
+  it('Batch 8E — workflowReliability surfaces in the routing reason when default route fires', () => {
+    const d = decideRoute({
+      ...base,
+      workflowReliability: { totalCompleted: 10, successRate: 0.4 },
+    });
+    expect(d.reason).toContain('workflow recent success 40%');
+    expect(d.reason).toContain('over 10');
+  });
+
+  it('Batch 8E — no annotation when workflowReliability is null', () => {
+    const d = decideRoute({ ...base, workflowReliability: null });
+    expect(d.reason).not.toContain('workflow recent success');
+  });
+
   it('falls back to default model when EVERY pin + preferred is demoted', () => {
     const d = decideRoute({
       ...base,
