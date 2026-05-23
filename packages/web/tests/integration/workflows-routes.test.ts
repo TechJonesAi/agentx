@@ -10,6 +10,9 @@ import Database from 'better-sqlite3';
 import { createApiRouter } from '../../src/server/routes/api.js';
 import { WorkflowRunStore } from '@agentx/core';
 
+// Windows IO budget — see workflow-run-store-reliability.test.ts.
+const SLOW_IO = 60_000;
+
 interface CallResult { status: number; body: Record<string, unknown>; }
 
 function call(router: ReturnType<typeof createApiRouter>, method: string, url: string, body?: unknown): Promise<CallResult> {
@@ -81,7 +84,7 @@ describe('GET /api/workflows', () => {
     const summary = r.body['summary'] as Record<string, number>;
     expect(summary.succeeded).toBe(1);
     expect(summary.running).toBe(1);
-  });
+  }, SLOW_IO);
 
   it('filters by state query param', async () => {
     const a = store.start({ goal: 'g-a' });
@@ -92,7 +95,7 @@ describe('GET /api/workflows', () => {
     const runs = r.body['runs'] as Array<{ goal: string }>;
     expect(runs).toHaveLength(1);
     expect(runs[0]?.goal).toBe('g-a');
-  });
+  }, SLOW_IO);
 });
 
 describe('GET /api/workflows/:loopId', () => {
@@ -106,12 +109,12 @@ describe('GET /api/workflows/:loopId', () => {
     expect(events.length).toBeGreaterThanOrEqual(2);
     expect(events.map(e => e.eventKind)).toContain('start');
     expect(events.map(e => e.eventKind)).toContain('phase_change');
-  });
+  }, SLOW_IO);
 
   it('returns 404 for unknown loopId', async () => {
     const r = await call(router, 'GET', '/api/workflows/does-not-exist');
     expect(r.status).toBe(404);
-  });
+  }, SLOW_IO);
 });
 
 describe('POST /api/workflows/:loopId/pause + /resume', () => {
@@ -124,12 +127,12 @@ describe('POST /api/workflows/:loopId/pause + /resume', () => {
     const r = await call(router, 'POST', `/api/workflows/${a.loopId}/resume`, { from: 'paused' });
     expect(r.status).toBe(200);
     expect(store.get(a.loopId)!.state).toBe('running');
-  });
+  }, SLOW_IO);
 
   it('pause returns 404 for unknown id', async () => {
     const r = await call(router, 'POST', '/api/workflows/nope/pause', {});
     expect(r.status).toBe(404);
-  });
+  }, SLOW_IO);
 });
 
 describe('POST /api/workflows/:loopId/reject — Batch 7A approval reject', () => {
@@ -152,10 +155,10 @@ describe('POST /api/workflows/:loopId/reject — Batch 7A approval reject', () =
     const kinds = events.map(e => e.eventKind);
     expect(kinds).toContain('approval_request');
     expect(kinds).toContain('failure');
-  });
+  }, SLOW_IO);
 
   it('returns 404 for unknown id', async () => {
     const r = await call(router, 'POST', '/api/workflows/does-not-exist/reject', {});
     expect(r.status).toBe(404);
-  });
+  }, SLOW_IO);
 });
