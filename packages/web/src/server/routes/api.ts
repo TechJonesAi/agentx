@@ -923,6 +923,194 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // Batch 10 — live benchmark runner. Drives BOTH Ollama and oMLX
+        // through the requested categories and records each sample to the
+        // ProviderBenchmarkStore. Body shape:
+        //   { categories?: string[], maxSamplesPerProvider?: number }
+        // When oMLX is not configured (or unreachable), the route honestly
+        // reports per-provider availability and skips that side — never
+        // pretends success.
+        if (route === '/api/models/benchmark-local-providers' && method === 'POST') {
+          let body: Record<string, unknown> = {};
+          try { body = await parseBody(req); } catch { /* default */ }
+          const requestedCategories = Array.isArray(body['categories'])
+            ? (body['categories'] as unknown[]).filter((c): c is string => typeof c === 'string')
+            : ['retrieval-grounded-qa', 'tool-calling', 'json-formatting', 'coding', 'summarisation', 'long-context'];
+          const maxSamples = Math.max(1, Math.min(5, Number(body['maxSamplesPerProvider'] ?? 1)));
+
+          // Category → { prompt, system?, scoreFn(text) }
+          const CATEGORIES: Record<string, {
+            prompt: string;
+            system?: string;
+            scoreFn(text: string): { score: number; jsonValid?: boolean; toolCallValid?: boolean; notes?: string };
+          }> = {
+            'retrieval-grounded-qa': {
+              prompt: 'You have one fact in memory: [MEM-1] "AgentX was created on 2026-05-01". When did AgentX start? Answer in one sentence and cite [MEM-1].',
+              scoreFn: (t) => {
+                const cited = /\[MEM-1\]/i.test(t);
+                const correctDate = /2026-05-01/.test(t);
+                return { score: (cited ? 0.5 : 0) + (correctDate ? 0.5 : 0), notes: `cited=${cited} correctDate=${correctDate}` };
+              },
+            },
+            'tool-calling': {
+              prompt: 'Output exactly one JSON object on a single line with key "action" set to "noop": {"action":"noop"}',
+              scoreFn: (t) => {
+                try {
+                  const m = t.match(/\{[^}]+\}/);
+                  if (!m) return { score: 0, jsonValid: false, toolCallValid: false };
+                  const o = JSON.parse(m[0]);
+                  const valid = o.action === 'noop';
+                  return { score: valid ? 1 : 0.3, jsonValid: true, toolCallValid: valid };
+                } catch { return { score: 0, jsonValid: false, toolCallValid: false }; }
+              },
+            },
+            'json-formatting': {
+              prompt: 'Output ONLY this JSON, no prose: {"ok": true, "n": 42}',
+              scoreFn: (t) => {
+                try {
+                  const m = t.match(/\{[\s\S]*\}/);
+                  if (!m) return { score: 0, jsonValid: false };
+                  const o = JSON.parse(m[0]);
+                  const valid = o.ok === true && o.n === 42;
+                  return { score: valid ? 1 : 0.4, jsonValid: true };
+                } catch { return { score: 0, jsonValid: false }; }
+              },
+            },
+            'coding': {
+              prompt: 'Write a TypeScript function `add(a:number,b:number):number` that returns a+b. Output only the function, no explanation.',
+              scoreFn: (t) => {
+                const hasFn = /function\s+add\s*\(/.test(t) || /add\s*=\s*\(/.test(t);
+                const hasReturn = /return\s+a\s*\+\s*b/.test(t);
+                return { score: (hasFn ? 0.5 : 0) + (hasReturn ? 0.5 : 0), notes: `hasFn=${hasFn} hasReturn=${hasReturn}` };
+              },
+            },
+            'summarisation': {
+              prompt: 'Summarise in one sentence: "AgentX is a local-first autonomous AI runtime that uses Ollama and optionally oMLX as parallel local LLM providers, with workflow durability and self-healing."',
+              scoreFn: (t) => {
+                const wc = t.trim().split(/\s+/).length;
+                const mentions = (/agentx/i.test(t) ? 1 : 0) + (/local|offline/i.test(t) ? 1 : 0) + (/(ollama|mlx)/i.test(t) ? 1 : 0);
+                const lengthOk = wc >= 6 && wc <= 60;
+                return { score: (lengthOk ? 0.3 : 0) + (mentions / 3) * 0.7, notes: `words=${wc} mentions=${mentions}` };
+              },
+            },
+            'long-context': {
+              prompt: 'The hidden token is BEACON-42. ' + 'Filler text. '.repeat(100) + 'What is the hidden token? Reply with just the token.',
+              scoreFn: (t) => {
+                const exact = /BEACON-42/.test(t);
+                return { score: exact ? 1 : 0, notes: `tokenFound=${exact}` };
+              },
+            },
+          };
+
+          const categories = requestedCategories.filter((c) => CATEGORIES[c]);
+          if (categories.length === 0) {
+            sendJson(res, 400, { error: 'No valid categories. Available: ' + Object.keys(CATEGORIES).join(', ') });
+            return;
+          }
+
+          // Provider runners — built lazily so a missing oMLX endpoint
+          // doesn't break the Ollama-only path.
+          type RunResult = { provider: string; model: string; latencyMs: number; text: string; failure?: string };
+          const ollamaEndpoint = process.env['OLLAMA_HOST'] ?? 'http://localhost:11434';
+          const ollamaModel = process.env['AGENTX_OLLAMA_MODEL'] ?? 'qwen2.5-coder:32b';
+          const omlxEndpoint = process.env['AGENTX_OMLX_ENDPOINT'];
+          const omlxModel = process.env['AGENTX_OMLX_MODEL'] ?? 'mlx-community/Llama-3.2-3B-Instruct-4bit';
+
+          const callOllama = async (prompt: string, system?: string): Promise<RunResult> => {
+            const t0 = Date.now();
+            try {
+              const msgs: Array<{ role: string; content: string }> = [];
+              if (system) msgs.push({ role: 'system', content: system });
+              msgs.push({ role: 'user', content: prompt });
+              const r = await fetch(`${ollamaEndpoint}/api/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: ollamaModel, messages: msgs, stream: false }),
+                signal: AbortSignal.timeout(60000),
+              });
+              if (!r.ok) return { provider: 'ollama', model: ollamaModel, latencyMs: Date.now() - t0, text: '', failure: `HTTP ${r.status}` };
+              const d = await r.json() as { message?: { content?: string } };
+              return { provider: 'ollama', model: ollamaModel, latencyMs: Date.now() - t0, text: d.message?.content ?? '' };
+            } catch (e) {
+              return { provider: 'ollama', model: ollamaModel, latencyMs: Date.now() - t0, text: '', failure: e instanceof Error ? e.message : String(e) };
+            }
+          };
+
+          const callOmlx = async (prompt: string, system?: string): Promise<RunResult | null> => {
+            if (!omlxEndpoint) return null;
+            try { (await import('@agentx/core') as { OmlxProvider: { assertLocalhostOnly(e: string): void } }).OmlxProvider.assertLocalhostOnly(omlxEndpoint); }
+            catch { return { provider: 'omlx', model: omlxModel, latencyMs: 0, text: '', failure: 'non-localhost endpoint blocked' }; }
+            const t0 = Date.now();
+            try {
+              const msgs: Array<{ role: string; content: string }> = [];
+              if (system) msgs.push({ role: 'system', content: system });
+              msgs.push({ role: 'user', content: prompt });
+              const r = await fetch(`${omlxEndpoint.replace(/\/+$/, '')}/v1/chat/completions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: omlxModel, messages: msgs, max_tokens: 256, temperature: 0 }),
+                signal: AbortSignal.timeout(60000),
+              });
+              if (!r.ok) return { provider: 'omlx', model: omlxModel, latencyMs: Date.now() - t0, text: '', failure: `HTTP ${r.status}` };
+              const d = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
+              return { provider: 'omlx', model: omlxModel, latencyMs: Date.now() - t0, text: d.choices?.[0]?.message?.content ?? '' };
+            } catch (e) {
+              return { provider: 'omlx', model: omlxModel, latencyMs: Date.now() - t0, text: '', failure: e instanceof Error ? e.message : String(e) };
+            }
+          };
+
+          const benchStore = (agent as unknown as { getProviderBenchmarkStore?: () => { record(b: Record<string, unknown>): unknown } }).getProviderBenchmarkStore?.();
+          if (!benchStore) { sendJson(res, 503, { error: 'benchmark store unavailable' }); return; }
+
+          const results: Array<{ taskCategory: string; samples: Array<{ provider: string; score: number; latencyMs: number; failure?: string }> }> = [];
+          for (const cat of categories) {
+            const spec = CATEGORIES[cat]!;
+            const samples: Array<{ provider: string; score: number; latencyMs: number; failure?: string }> = [];
+            for (let i = 0; i < maxSamples; i++) {
+              const ollamaResult = await callOllama(spec.prompt, spec.system);
+              const ollamaScore = ollamaResult.failure ? { score: 0, notes: ollamaResult.failure } : spec.scoreFn(ollamaResult.text);
+              benchStore.record({
+                taskCategory: cat,
+                provider: ollamaResult.provider,
+                model: ollamaResult.model,
+                totalLatencyMs: ollamaResult.latencyMs,
+                score: ollamaScore.score,
+                jsonValid: ollamaScore.jsonValid ?? null,
+                toolCallValid: ollamaScore.toolCallValid ?? null,
+                failureReason: ollamaResult.failure,
+                notes: ollamaScore.notes,
+              });
+              samples.push({ provider: 'ollama', score: ollamaScore.score, latencyMs: ollamaResult.latencyMs, ...(ollamaResult.failure ? { failure: ollamaResult.failure } : {}) });
+
+              const omlxResult = await callOmlx(spec.prompt, spec.system);
+              if (omlxResult) {
+                const omlxScore = omlxResult.failure ? { score: 0, notes: omlxResult.failure } : spec.scoreFn(omlxResult.text);
+                benchStore.record({
+                  taskCategory: cat,
+                  provider: omlxResult.provider,
+                  model: omlxResult.model,
+                  totalLatencyMs: omlxResult.latencyMs,
+                  score: omlxScore.score,
+                  jsonValid: omlxScore.jsonValid ?? null,
+                  toolCallValid: omlxScore.toolCallValid ?? null,
+                  failureReason: omlxResult.failure,
+                  notes: omlxScore.notes,
+                });
+                samples.push({ provider: 'omlx', score: omlxScore.score, latencyMs: omlxResult.latencyMs, ...(omlxResult.failure ? { failure: omlxResult.failure } : {}) });
+              }
+            }
+            results.push({ taskCategory: cat, samples });
+          }
+          sendJson(res, 200, {
+            ok: true,
+            ranAt: new Date().toISOString(),
+            ollamaEndpoint, omlxEndpoint: omlxEndpoint ?? null,
+            categories: categories.length,
+            results,
+          });
+          return;
+        }
+
         // Batch 9 — provider benchmark history + comparison.
         if (route === '/api/providers/benchmarks' && method === 'GET') {
           try {

@@ -23,7 +23,14 @@ export type PrivateMemoryEventName =
   | 'tool_fallback_allowed'
   | 'tool_fallback_blocked'
   | 'external_request_attempted'
-  | 'external_request_blocked';
+  | 'external_request_blocked'
+  // Batch 10 — provider-intelligence trace events
+  | 'provider_benchmark_started'
+  | 'provider_benchmark_completed'
+  | 'provider_promoted'
+  | 'provider_demoted'
+  | 'provider_routing_override'
+  | 'provider_localonly_block';
 
 export interface PrivateMemoryEventBase {
   ts: number;
@@ -69,6 +76,42 @@ export interface ExternalRequestBlockedEvent extends PrivateMemoryEventBase {
   reason: 'local_only';
 }
 
+// ── Batch 10 — provider-intelligence event payloads ────────────────────
+export interface ProviderBenchmarkStartedEvent extends PrivateMemoryEventBase {
+  event: 'provider_benchmark_started';
+  taskCategory: string;
+  providers: string[];
+}
+export interface ProviderBenchmarkCompletedEvent extends PrivateMemoryEventBase {
+  event: 'provider_benchmark_completed';
+  taskCategory: string;
+  results: Array<{ provider: string; score: number; latencyMs?: number }>;
+}
+export interface ProviderPromotedEvent extends PrivateMemoryEventBase {
+  event: 'provider_promoted';
+  fromProvider: string;
+  toProvider: string;
+  taskCategory: string;
+  reason: string;
+}
+export interface ProviderDemotedEvent extends PrivateMemoryEventBase {
+  event: 'provider_demoted';
+  provider: string;
+  taskCategory: string;
+  reason: string;
+}
+export interface ProviderRoutingOverrideEvent extends PrivateMemoryEventBase {
+  event: 'provider_routing_override';
+  origin: 'user_pin' | 'localonly_block' | 'availability';
+  taskCategory: string;
+  reason: string;
+}
+export interface ProviderLocalOnlyBlockEvent extends PrivateMemoryEventBase {
+  event: 'provider_localonly_block';
+  endpoint: string;
+  reason: string;
+}
+
 export type PrivateMemoryEvent =
   | RetrievalStartedEvent
   | RetrievalResultsEvent
@@ -76,7 +119,13 @@ export type PrivateMemoryEvent =
   | ToolFallbackAllowedEvent
   | ToolFallbackBlockedEvent
   | ExternalRequestAttemptedEvent
-  | ExternalRequestBlockedEvent;
+  | ExternalRequestBlockedEvent
+  | ProviderBenchmarkStartedEvent
+  | ProviderBenchmarkCompletedEvent
+  | ProviderPromotedEvent
+  | ProviderDemotedEvent
+  | ProviderRoutingOverrideEvent
+  | ProviderLocalOnlyBlockEvent;
 
 const MAX_EVENTS_PER_CALL = 64;
 

@@ -45,6 +45,26 @@ export interface RoutingInputs {
    *  currently struggling. Future batches may use this to bias
    *  toward smaller / faster models. */
   workflowReliability?: { totalCompleted: number; successRate: number } | null;
+  /** Batch 10 — provider evidence input. When a ProviderBenchmarkStore
+   *  comparison for the current task category has a clear winner that
+   *  is NOT the default provider, the engine promotes that provider
+   *  for this call. Requires:
+   *    - reliabilityAware = true
+   *    - winner !== current default provider
+   *    - winner is among the providers in `availableProviders`
+   *    - user has NOT pinned a model (pins override evidence)
+   *  Recorded reason: "provider promoted via benchmark: ${reason}". */
+  providerEvidence?: {
+    winner: string | null;
+    reasons: string[];
+    perProvider: Array<{ provider: string; samples: number; avgScore: number }>;
+  } | null;
+  /** Providers available locally. The engine only considers candidates
+   *  in this set when promoting via evidence. */
+  availableProviders?: string[];
+  /** Optional override map: provider name → default model when promotion
+   *  fires (e.g. omlx → "mlx-community/Llama-3.2-3B-Instruct-4bit"). */
+  providerDefaultModel?: Record<string, string>;
 }
 
 export interface RoutingDecision {
@@ -163,6 +183,36 @@ export function decideRoute(inputs: RoutingInputs): RoutingDecision {
         classificationConfidence: inputs.classification.confidence,
       };
     }
+  }
+
+  // Batch 10 — evidence-based provider promotion. ONLY fires when:
+  //   - reliabilityAware is on
+  //   - no pin / preferred matched (we're in the default branch)
+  //   - benchmark has a clear winner AND it's not the current default
+  //   - winner is in availableProviders
+  // Promotion swaps to the winning provider's default model.
+  if (
+    inputs.reliabilityAware
+    && inputs.providerEvidence
+    && inputs.providerEvidence.winner
+    && inputs.providerEvidence.winner !== inputs.defaultProvider
+    && (inputs.availableProviders ?? []).includes(inputs.providerEvidence.winner)
+  ) {
+    const newProvider = inputs.providerEvidence.winner;
+    const newModel = inputs.providerDefaultModel?.[newProvider] ?? inputs.defaultModel;
+    const promotionReason = inputs.providerEvidence.reasons.join(' · ');
+    return {
+      model: newModel,
+      provider: newProvider,
+      reason: `provider promoted via benchmark for task '${t}': ${promotionReason}`,
+      pinUsed: false,
+      fallbackChain: [
+        ...fallbackChain,
+        { model: inputs.defaultModel, skipped: `provider demoted: benchmark winner is ${newProvider}` },
+      ],
+      taskType: t,
+      classificationConfidence: inputs.classification.confidence,
+    };
   }
 
   // Batch 8E — append a workflow-success annotation when the data is
