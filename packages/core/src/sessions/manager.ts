@@ -90,9 +90,9 @@ export class SessionManager {
 
   // ─── Original API (backward-compatible) ────────────────────────────────────
 
-  create(options?: { userId?: string; platform?: string; metadata?: Record<string, unknown> }): Session {
+  create(options?: { id?: string; userId?: string; platform?: string; metadata?: Record<string, unknown> }): Session {
     const session: Session = {
-      id: uuid(),
+      id: options?.id ?? uuid(),
       userId: options?.userId,
       platform: options?.platform,
       messages: [],
@@ -124,7 +124,11 @@ export class SessionManager {
       const existing = this.get(sessionId);
       if (existing) return existing;
     }
-    return this.create(options);
+    // Honour the caller's requested ID. Generating a fresh uuid here meant
+    // every API call with an as-yet-unknown sessionId silently landed in its
+    // own new session — conversation history never accumulated and the agent
+    // "forgot" everything between messages.
+    return this.create({ ...options, id: sessionId });
   }
 
   update(sessionId: string, messages: Message[]): void {
@@ -297,9 +301,19 @@ export class SessionManager {
   // ─── Persistence ────────────────────────────────────────────────────────────
 
   private persistSession(session: Session): void {
+    // MUST be a true upsert, never INSERT OR REPLACE: REPLACE deletes the
+    // old row before inserting, and messages.session_id has ON DELETE
+    // CASCADE — so REPLACE silently erased the session's ENTIRE message
+    // history on every persist (i.e. after every chat turn). That was the
+    // "agent forgets everything mid-conversation" bug.
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO sessions (id, user_id, platform, metadata, created_at, updated_at)
+      INSERT INTO sessions (id, user_id, platform, metadata, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        user_id = excluded.user_id,
+        platform = excluded.platform,
+        metadata = excluded.metadata,
+        updated_at = excluded.updated_at
     `);
 
     stmt.run(

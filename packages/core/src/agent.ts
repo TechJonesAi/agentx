@@ -149,6 +149,22 @@ INSIDE that directory (use the workingDir argument of the shell tool OR
 absolute paths). NEVER write app files into the AgentX project root or
 the user's home directory directly. NEVER mix files for different apps.
 
+CRITICAL — Web page / CV / site DESIGN QUALITY:
+When the user asks for a web page, online CV, portfolio, landing page, or
+any HTML deliverable, plain unstyled HTML is a FAILURE. Always produce a
+complete, self-contained, polished document:
+  - Full HTML5 skeleton with embedded <style> (no external CSS files needed
+    to look good when opened directly in a browser).
+  - A deliberate colour palette (define CSS custom properties), modern
+    typography (system font stack or a Google Font link), generous spacing.
+  - Real layout: CSS grid/flexbox, a styled header/hero, clear sections,
+    cards or timeline styling for experience entries, responsive at mobile
+    widths, and print-friendly (@media print) when it is a CV.
+  - Tasteful details: subtle shadows, rounded corners, hover states,
+    accent colours on headings/links — a design a professional would ship.
+Ask yourself: "would a designer be happy to publish this?" If not, improve
+it before responding. Never output a wall of unstyled <p> tags.
+
 CRITICAL — Editing existing files (preserve content):
 When you modify an EXISTING file that the user already has, NEVER use
 \`echo "..." > file\` to overwrite the whole file unless you are emitting

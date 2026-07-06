@@ -95,6 +95,18 @@ export class OllamaProvider extends BaseLLMProvider {
   }
 
   /**
+   * Context window per request. Ollama's server-side default is tiny (2-4k
+   * tokens) — long chats were silently truncated from the front, so the
+   * model "forgot" earlier turns and its own prior output. 16k is
+   * comfortable for every fleet model on this machine's RAM;
+   * AGENTX_OLLAMA_NUM_CTX overrides.
+   */
+  private getNumCtx(): number {
+    const env = Number(process.env['AGENTX_OLLAMA_NUM_CTX']);
+    return Number.isFinite(env) && env >= 2048 ? env : 16384;
+  }
+
+  /**
    * Adaptive timeout per model size — only applied when tool calling is
    * enabled. Plain chat (flag off) uses the default fetch timeout to
    * preserve historical behaviour.
@@ -123,6 +135,7 @@ export class OllamaProvider extends BaseLLMProvider {
       model: activeModel,
       messages,
       stream: false,
+      options: { num_ctx: this.getNumCtx() },
     };
     if (tools.length > 0) {
       body.tools = tools;
@@ -203,6 +216,7 @@ export class OllamaProvider extends BaseLLMProvider {
       model: activeModel,
       messages,
       stream: true,
+      options: { num_ctx: this.getNumCtx() },
     };
     if (tools.length > 0) {
       body.tools = tools;

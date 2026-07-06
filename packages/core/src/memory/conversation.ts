@@ -34,12 +34,18 @@ export class ConversationMemory {
 
   getMessages(sessionId: string, limit?: number): Message[] {
     const effectiveLimit = limit ?? this.maxHistory;
+    // Keep the most RECENT N messages, returned in chronological order.
+    // (ASC LIMIT kept the OLDEST N — once a session grew past the limit the
+    // model stopped seeing its own latest work and "forgot" mid-conversation.)
     const stmt = this.db.prepare(`
-      SELECT role, content, tool_call_id, tool_calls, timestamp
-      FROM messages
-      WHERE session_id = ?
-      ORDER BY timestamp ASC
-      LIMIT ?
+      SELECT role, content, tool_call_id, tool_calls, timestamp FROM (
+        SELECT rowid AS rid, role, content, tool_call_id, tool_calls, timestamp
+        FROM messages
+        WHERE session_id = ?
+        ORDER BY timestamp DESC, rid DESC
+        LIMIT ?
+      )
+      ORDER BY timestamp ASC, rid ASC
     `);
 
     const rows = stmt.all(sessionId, effectiveLimit) as Array<{
