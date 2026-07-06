@@ -7,6 +7,24 @@ import { SynthesisCard, type SynthesisData } from '../components/SynthesisCard';
 import { renderMessageContent } from '../components/renderMessageContent';
 import { AttachmentCards, type AttachmentSummary } from '../components/AttachmentCards';
 
+/** Minimal structural type for the browser SpeechRecognition API
+ *  (webkit-prefixed in Chrome/Safari; not in the DOM lib typings). */
+interface SpeechRecognitionLike {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  onresult:
+    | ((e: {
+        resultIndex: number;
+        results: ArrayLike<{ isFinal: boolean; 0?: { transcript: string } }>;
+      }) => void)
+    | null;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+  start(): void;
+  stop(): void;
+}
+
 /**
  * Chat page — Step 2 (visual merge with Silly Johnson, R1–R12-safe).
  *
@@ -140,6 +158,11 @@ export function Chat(): React.JSX.Element {
       audioUrlRef.current = url;
       const audio = new Audio(url);
       audioRef.current = audio;
+      // Hands-free loop: when the reply finishes speaking, re-open the mic
+      // so the user can answer without touching anything (ChatGPT-style).
+      audio.onended = () => {
+        if (handsFreeRef.current) startListeningRef.current?.();
+      };
       void audio.play().catch(() => { /* autoplay may require a gesture — toggle click counts */ });
     } catch { /* best-effort */ }
   }, []);
@@ -152,6 +175,73 @@ export function Chat(): React.JSX.Element {
     }
     return () => { if (audioRef.current) audioRef.current.pause(); };
   }, [voiceOn]);
+
+  // ── Voice input (speech-to-text): talk to AgentX, not just type ─────
+  // Mic button → browser SpeechRecognition → live transcript in the
+  // composer → auto-send on end of speech. With Voice On, replies are
+  // spoken AND the mic re-arms after playback = full conversation mode.
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const handsFreeRef = useRef(false);
+  const startListeningRef = useRef<(() => void) | null>(null);
+  const handleSendRef = useRef<((overrideText?: string) => Promise<void>) | null>(null);
+
+  const speechGlobals = window as unknown as {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+  };
+  const RecognitionCtor = speechGlobals.SpeechRecognition ?? speechGlobals.webkitSpeechRecognition;
+  const micSupported = Boolean(RecognitionCtor);
+
+  const stopListening = useCallback(() => {
+    handsFreeRef.current = false;
+    try { recognitionRef.current?.stop(); } catch { /* already stopped */ }
+    recognitionRef.current = null;
+    setListening(false);
+  }, []);
+
+  const startListening = useCallback(() => {
+    if (!RecognitionCtor || recognitionRef.current) return;
+    const rec = new RecognitionCtor();
+    rec.lang = navigator.language || 'en-GB';
+    rec.interimResults = true;
+    rec.continuous = false;
+    let finalText = '';
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i]?.[0]?.transcript ?? '';
+        if (e.results[i]?.isFinal) finalText += t;
+        else interim += t;
+      }
+      setInput(finalText + interim);
+    };
+    rec.onend = () => {
+      recognitionRef.current = null;
+      setListening(false);
+      const text = finalText.trim();
+      if (text) {
+        setInput('');
+        void handleSendRef.current?.(text);
+      } else if (handsFreeRef.current) {
+        // Silence — re-arm so a pause doesn't kill the conversation.
+        setTimeout(() => startListeningRef.current?.(), 400);
+      }
+    };
+    rec.onerror = () => {
+      recognitionRef.current = null;
+      setListening(false);
+    };
+    recognitionRef.current = rec;
+    setListening(true);
+    try { rec.start(); } catch { setListening(false); recognitionRef.current = null; }
+  }, [RecognitionCtor]);
+  useEffect(() => { startListeningRef.current = startListening; }, [startListening]);
+  // Kill the mic (and hands-free loop) on unmount.
+  useEffect(() => () => {
+    handsFreeRef.current = false;
+    try { recognitionRef.current?.stop(); } catch { /* noop */ }
+  }, []);
 
   // auto-scroll on new content
   useEffect(() => {
@@ -170,8 +260,8 @@ export function Chat(): React.JSX.Element {
     [],
   );
 
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
+  const handleSend = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if ((!text && attachments.length === 0) || sending) return;
 
     setBannerError(null);
@@ -399,6 +489,8 @@ export function Chat(): React.JSX.Element {
       setSending(false);
     }
   }, [input, sending, attachments, sessionId, persona, updateAssistant, speakText]);
+  // Ref mirror so speech-recognition callbacks always send via the latest closure.
+  useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);
 
   const onFileChosen = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const files = e.target.files ? Array.from(e.target.files) : [];
@@ -544,9 +636,31 @@ export function Chat(): React.JSX.Element {
               void handleSend();
             }
           }}
-          placeholder={sending ? 'Waiting for response…' : 'Type a message…'}
+          placeholder={listening ? 'Listening… speak now' : sending ? 'Waiting for response…' : 'Type a message or tap the mic…'}
           disabled={sending}
         />
+        {micSupported && (
+          <button
+            type="button"
+            className="composer-send"
+            style={listening ? { background: '#da3633', animation: 'pulse 1.2s infinite' } : undefined}
+            onClick={() => {
+              if (listening) {
+                stopListening();
+              } else {
+                // Hands-free conversation when Voice is on: replies are
+                // spoken and the mic re-arms after each answer.
+                handsFreeRef.current = voiceOnRef.current;
+                startListening();
+              }
+            }}
+            title={listening ? 'Stop listening' : voiceOn ? 'Start voice conversation (hands-free)' : 'Speak your message'}
+            aria-pressed={listening}
+            disabled={sending}
+          >
+            {listening ? '⏹' : '🎤'}
+          </button>
+        )}
         <button
           type="submit"
           className="composer-send"

@@ -9,7 +9,6 @@ import type { Agent } from '@agentx/core';
 import { createLogger } from '@agentx/core';
 import { tryUnsupportedSpaShim, unknownEndpointEnvelope } from './spa-shims.js';
 import { createTtsRouter, type TtsRouter } from '../tts/index.js';
-import { BillboardCampaignService } from '../billboard-campaign.js';
 import {
   listMemoryItems,
   getMemoryDetail,
@@ -172,11 +171,6 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
     if (!ttsRouter) ttsRouter = createTtsRouter();
     return ttsRouter;
   };
-  let billboardCampaign: BillboardCampaignService | null = null;
-  const getBillboardCampaign = (): BillboardCampaignService => {
-    billboardCampaign ??= new BillboardCampaignService();
-    return billboardCampaign;
-  };
 
   return {
     async handle(method: string, url: string, req: http.IncomingMessage, res: http.ServerResponse) {
@@ -192,85 +186,6 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
       }
 
       try {
-        // Rankinfy billboard outreach. Draft generation never approves or sends.
-        if (route === '/api/billboard/summary' && method === 'GET') {
-          sendJson(res, 200, getBillboardCampaign().getSummary());
-          return;
-        }
-        if (route === '/api/billboard/agencies' && method === 'GET') {
-          sendJson(res, 200, { agencies: getBillboardCampaign().listAgencies() });
-          return;
-        }
-        if (route === '/api/billboard/agencies/import' && method === 'POST') {
-          sendJson(res, 200, getBillboardCampaign().importSeeds());
-          return;
-        }
-        if (route === '/api/billboard/agencies/enrich' && method === 'POST') {
-          sendJson(res, 200, await getBillboardCampaign().enrichAll());
-          return;
-        }
-        const billboardAgencyMatch = route.match(/^\/api\/billboard\/agencies\/(\d+)$/);
-        if (billboardAgencyMatch && method === 'PATCH') {
-          const body = await parseBody(req);
-          sendJson(res, 200, getBillboardCampaign().setAgencyContact(Number(billboardAgencyMatch[1]), {
-            email: typeof body.email === 'string' ? body.email : null,
-            contactPageUrl: typeof body.contactPageUrl === 'string' ? body.contactPageUrl : null,
-            note: typeof body.note === 'string' ? body.note : undefined,
-          }));
-          return;
-        }
-        const billboardEnrichMatch = route.match(/^\/api\/billboard\/agencies\/(\d+)\/enrich$/);
-        if (billboardEnrichMatch && method === 'POST') {
-          sendJson(res, 200, await getBillboardCampaign().enrichAgency(Number(billboardEnrichMatch[1])));
-          return;
-        }
-        if (route === '/api/billboard/drafts' && method === 'GET') {
-          sendJson(res, 200, { drafts: getBillboardCampaign().listDrafts() });
-          return;
-        }
-        if (route === '/api/billboard/drafts/generate' && method === 'POST') {
-          sendJson(res, 200, getBillboardCampaign().generateDrafts());
-          return;
-        }
-        const billboardDraftMatch = route.match(/^\/api\/billboard\/drafts\/(\d+)$/);
-        if (billboardDraftMatch && method === 'PATCH') {
-          const body = await parseBody(req);
-          sendJson(res, 200, getBillboardCampaign().updateDraft(Number(billboardDraftMatch[1]), {
-            subject: typeof body.subject === 'string' ? body.subject : undefined,
-            body: typeof body.body === 'string' ? body.body : undefined,
-            recipientEmail: typeof body.recipientEmail === 'string' ? body.recipientEmail : undefined,
-          }));
-          return;
-        }
-        const billboardApproveMatch = route.match(/^\/api\/billboard\/drafts\/(\d+)\/approve$/);
-        if (billboardApproveMatch && method === 'POST') {
-          sendJson(res, 200, getBillboardCampaign().approveDraft(Number(billboardApproveMatch[1])));
-          return;
-        }
-        if (route === '/api/billboard/suppressions' && method === 'POST') {
-          const body = await parseBody(req);
-          if (typeof body.email !== 'string') { sendJson(res, 400, { error: 'email is required' }); return; }
-          getBillboardCampaign().suppress(body.email, typeof body.reason === 'string' ? body.reason : undefined);
-          sendJson(res, 200, { suppressed: true });
-          return;
-        }
-        if (route === '/api/billboard/campaign/start' && method === 'POST') {
-          sendJson(res, 200, getBillboardCampaign().start());
-          return;
-        }
-        if (route === '/api/billboard/campaign/pause' && method === 'POST') {
-          sendJson(res, 200, getBillboardCampaign().pause());
-          return;
-        }
-        if (route === '/api/billboard/campaign/resume' && method === 'POST') {
-          sendJson(res, 200, getBillboardCampaign().resume());
-          return;
-        }
-        if (route === '/api/billboard/campaign/stop' && method === 'POST') {
-          sendJson(res, 200, getBillboardCampaign().stop());
-          return;
-        }
-
         // ─── Health ──────────────────────────────────────────────────────
         if (route === '/api/health' && method === 'GET') {
           sendJson(res, 200, { ok: true, timestamp: new Date().toISOString() });
@@ -2167,19 +2082,45 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
-        // Multi-agent supervisor (BuilderV2)
+        // Runtime service matrix — the live self-heal fleet. Probes each
+        // sidecar's health endpoint so the Integrity → Services tab shows
+        // real state (previously proxied the BuilderV2 supervisor, which is
+        // flag-off, so the tab got no services array and crashed the page).
         if (route === '/api/supervisor/status' && method === 'GET') {
-          const sup = (agent as unknown as { getMultiAgentSupervisor?: () => unknown | null }).getMultiAgentSupervisor?.();
-          if (!sup) {
-            sendJson(res, 200, { available: false, reason: 'BuilderV2 feature flag is off' });
-            return;
-          }
-          try {
-            const status = (sup as { getStatus?: () => unknown }).getStatus?.() ?? null;
-            sendJson(res, 200, { available: true, status });
-          } catch (e) {
-            sendJson(res, 200, { available: true, error: String(e) });
-          }
+          const probes: Array<{ name: string; url: string; managed: boolean }> = [
+            { name: 'web-server', url: `http://127.0.0.1:${process.env['PORT'] ?? 3001}/api/health`, managed: false },
+            { name: 'ollama', url: 'http://127.0.0.1:11434/api/tags', managed: true },
+            { name: 'omlx (MLX fast lane)', url: `http://127.0.0.1:${process.env['AGENTX_OMLX_PORT'] ?? 8080}/v1/models`, managed: true },
+            { name: 'qwen3-tts', url: 'http://127.0.0.1:9880/health', managed: true },
+            { name: 'memory-api', url: `http://127.0.0.1:${process.env['AGENTX_MEMORY_API_PORT'] ?? 8100}/health`, managed: true },
+          ];
+          const services = await Promise.all(probes.map(async (p) => {
+            let healthy = false;
+            try {
+              const ctl = new AbortController();
+              const t = setTimeout(() => ctl.abort(), 2500);
+              const r = await fetch(p.url, { signal: ctl.signal });
+              clearTimeout(t);
+              healthy = r.ok;
+            } catch { /* unreachable */ }
+            return {
+              id: p.name.split(' ')[0],
+              name: p.name,
+              type: p.name === 'web-server' ? 'node' : 'external',
+              state: healthy ? 'healthy' : 'unreachable',
+              manageable: p.managed,
+              restartCount: 0,
+              lastHealthMessage: `${healthy ? 'OK' : 'no response'} — ${p.url}`,
+            };
+          }));
+          sendJson(res, 200, {
+            available: true,
+            services,
+            managedCount: services.filter((s) => s.manageable).length,
+            unmanagedCount: services.filter((s) => !s.manageable).length,
+            healthyCount: services.filter((s) => s.state === 'healthy').length,
+            unhealthyCount: services.filter((s) => s.state !== 'healthy').length,
+          });
           return;
         }
 
@@ -3660,21 +3601,29 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               sendJson(res, status, { error: e instanceof Error ? e.message : String(e) });
               return;
             }
-            // Accept the first image-like part. Field names commonly used by
-            // SPA pages: `image`, `file`, `upload`. Anything with a non-empty
-            // buffer is accepted; we validate by simple length/type checks.
-            const imagePart = parsed.files.find((f) =>
-              f.fieldName === 'image' || f.fieldName === 'file' || f.fieldName === 'upload',
-            ) ?? parsed.files[0];
-            if (!imagePart || !imagePart.data || imagePart.data.length === 0) {
+            // Analyze EVERY uploaded image part (the Vision page sends a
+            // batch and renders a per-file results array).
+            const imageParts = parsed.files.filter((f) => f.data && f.data.length > 0);
+            if (imageParts.length === 0) {
               sendJson(res, 400, { error: 'no image file in multipart body' });
               return;
             }
-            const result = await analyzeImageBuffer(imagePart.data);
+            const results = [];
+            for (const part of imageParts) {
+              const r = await analyzeImageBuffer(part.data);
+              results.push({
+                filename: part.filename,
+                success: r.available,
+                analysis: r.description ?? r.reason ?? 'No analysis available',
+                durationMs: r.latencyMs,
+                model: r.model,
+                size: part.data.length,
+              });
+            }
             sendJson(res, 200, {
-              ...result,
-              filename: imagePart.filename,
-              size: imagePart.data.length,
+              results,
+              totalAnalyzed: results.length,
+              successCount: results.filter((r) => r.success).length,
             });
           } catch (e) {
             sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
@@ -3996,13 +3945,32 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
-        // Multimodal status — read agent's feature flags
+        // Multimodal status — live probe of the vision model. Previously
+        // hardcoded available:false, so the Vision tab showed UNAVAILABLE
+        // even though qwen3-vl is installed and /api/vision/analyze works.
         if (route === '/api/multimodal/status' && method === 'GET') {
           try {
             const cfg = agent.getConfig();
+            const visionModel = process.env['AGENTX_VISION_MODEL'] || 'qwen3-vl:32b';
+            let visionAvailable = false;
+            try {
+              const ctl = new AbortController();
+              const t = setTimeout(() => ctl.abort(), 4000);
+              const r = await fetch('http://127.0.0.1:11434/api/tags', { signal: ctl.signal });
+              clearTimeout(t);
+              if (r.ok) {
+                const data = await r.json() as { models?: Array<{ name: string }> };
+                visionAvailable = (data.models ?? []).some((m) => m.name.includes('qwen3-vl'));
+              }
+            } catch { /* Ollama unreachable → vision unavailable */ }
             sendJson(res, 200, {
-              available: false,
-              reason: 'Multimodal router not yet wired to agent.chat() (subsystem present)',
+              available: visionAvailable,
+              overall: visionAvailable ? 'available' : 'unavailable',
+              modalities: [
+                { modality: 'image', status: visionAvailable ? 'available' : 'unavailable', provider: visionModel },
+              ],
+              visionModel,
+              reason: visionAvailable ? undefined : 'qwen3-vl not installed or Ollama unreachable',
               voice: cfg.voice ?? null,
             });
           } catch (e) {

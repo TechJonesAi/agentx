@@ -545,7 +545,7 @@ export function Integrity() {
       {activeTab === 'services' && (
         <div className="content-card" style={{ padding: 'var(--spacing-lg)' }}>
           <h3 style={{ marginBottom: 'var(--spacing-md)' }}>Runtime Services</h3>
-          {supervisorStatus && supervisorStatus.services.length > 0 ? (
+          {supervisorStatus?.services && supervisorStatus.services.length > 0 ? (
             <>
               <div style={{ display: 'flex', gap: 'var(--spacing-lg)', marginBottom: 'var(--spacing-lg)', fontSize: '0.85rem' }}>
                 <span>Total: {supervisorStatus.services.length}</span>

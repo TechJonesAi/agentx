@@ -5,9 +5,9 @@
  * No live Ollama dependency. Covers:
  *   - rejects non-multipart body (400)
  *   - rejects missing image part (400)
- *   - returns {available:false} when provider reports unavailable
- *   - returns {available:true, description} when provider succeeds
- *   - returns {available:false} when provider returns a "[…]" placeholder
+ *   - batched {results:[{success,analysis,…}], successCount, totalAnalyzed}
+ *     shape (matches the Vision page contract); per-file success=false when
+ *     the provider is unavailable or returns a placeholder
  *   - builder/run still returns the honest shim envelope (501)
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -168,10 +168,11 @@ describe('Tier 3 Vision — POST /api/vision/analyze', () => {
         data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
     ]);
     expect(r.status).toBe(200);
-    expect(r.body['available']).toBe(false);
-    expect(String(r.body['reason'])).toMatch(/vision model not available/i);
-    expect(r.body['model']).toBeDefined();
-    expect(r.body['description']).toBeUndefined();
+    expect(r.body['totalAnalyzed']).toBe(1);
+    expect(r.body['successCount']).toBe(0);
+    const res0 = (r.body['results'] as Array<Record<string, unknown>>)[0]!;
+    expect(res0['success']).toBe(false);
+    expect(String(res0['analysis'])).toMatch(/vision model not available/i);
   });
 
   it('returns {available:true, description} when provider succeeds', async () => {
@@ -182,11 +183,13 @@ describe('Tier 3 Vision — POST /api/vision/analyze', () => {
         data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
     ]);
     expect(r.status).toBe(200);
-    expect(r.body['available']).toBe(true);
-    expect(r.body['description']).toMatch(/red boat/i);
-    expect(r.body['filename']).toBe('boat.png');
-    expect(r.body['size']).toBe(4);
-    expect(typeof r.body['latencyMs']).toBe('number');
+    expect(r.body['successCount']).toBe(1);
+    const boat = (r.body['results'] as Array<Record<string, unknown>>)[0]!;
+    expect(boat['success']).toBe(true);
+    expect(String(boat['analysis'])).toMatch(/red boat/i);
+    expect(boat['filename']).toBe('boat.png');
+    expect(boat['size']).toBe(4);
+    expect(typeof boat['durationMs']).toBe('number');
   });
 
   it('treats "[…]" placeholder as unavailable', async () => {
@@ -197,8 +200,10 @@ describe('Tier 3 Vision — POST /api/vision/analyze', () => {
         data: Buffer.from([0xff, 0xd8, 0xff]) },
     ]);
     expect(r.status).toBe(200);
-    expect(r.body['available']).toBe(false);
-    expect(String(r.body['reason'])).toMatch(/no description/i);
+    expect(r.body['successCount']).toBe(0);
+    const ph = (r.body['results'] as Array<Record<string, unknown>>)[0]!;
+    expect(ph['success']).toBe(false);
+    expect(String(ph['analysis'])).toMatch(/no description/i);
   });
 
   it('accepts file under "upload" field name too', async () => {
@@ -209,7 +214,7 @@ describe('Tier 3 Vision — POST /api/vision/analyze', () => {
         data: Buffer.from([0xff, 0xd8, 0xff, 0xe0]) },
     ]);
     expect(r.status).toBe(200);
-    expect(r.body['available']).toBe(true);
+    expect(r.body['successCount']).toBe(1);
   });
 });
 
