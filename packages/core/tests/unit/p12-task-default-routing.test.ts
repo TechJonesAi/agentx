@@ -209,3 +209,20 @@ describe('P13 fix — smalltalk retrieval gate', () => {
     expect(shouldSkipRetrievalForSmalltalk('Summarise the tribunal hearing bundle')).toBe(false);
   });
 });
+
+describe('P13 fix — assistant-meta retrieval gate', () => {
+  it('skips retrieval for questions about the assistant', async () => {
+    const { shouldSkipRetrievalForSmalltalk } = await import('../../src/observability/task-classifier.js');
+    expect(shouldSkipRetrievalForSmalltalk('Whats your name?')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk("What's your name?")).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('Who are you?')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('What can you do?')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('Are you an AI?')).toBe(true);
+  });
+
+  it('still retrieves for content questions containing similar words', async () => {
+    const { shouldSkipRetrievalForSmalltalk } = await import('../../src/observability/task-classifier.js');
+    expect(shouldSkipRetrievalForSmalltalk('What is the name of the engineer Penny mentioned?')).toBe(false);
+    expect(shouldSkipRetrievalForSmalltalk('Who are the respondents in my tribunal case?')).toBe(false);
+  });
+});

@@ -108,10 +108,17 @@ const RULES: Array<{ task: TaskType; weight: number; pattern: RegExp; label: str
  * explicit smalltalk opener — the same positive-evidence signals the
  * router uses, so gating stays consistent with routing.
  */
+const ASSISTANT_META_RX =
+  /\b(?:what(?:'?s| is) your name|who are you|what (?:are|can) you(?:\s+do)?|tell me about yourself|are you (?:an? )?(?:ai|bot|robot|assistant)|what model are you|introduce yourself)\b/i;
+
 export function shouldSkipRetrievalForSmalltalk(input: string): boolean {
   const c = classifyTask(input);
   if (c.primary === 'fast-response') return true;
   if (c.primary === 'chat' && c.signals.some((s) => s.startsWith('smalltalk'))) return true;
+  // Questions about the ASSISTANT itself ("what's your name", "who are
+  // you") must not hit the corpus either — "whats" matches email prose
+  // ("noting whats happened…") and floods the UI with evidence.
+  if (ASSISTANT_META_RX.test(input)) return true;
   return false;
 }
 
