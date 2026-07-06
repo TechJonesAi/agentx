@@ -115,7 +115,7 @@ import { ToolOutcomeStore } from './observability/tool-outcome-store.js';
 import { HealthMonitor } from './observability/health-monitor.js';
 import { RuntimeSettingsStore } from './observability/runtime-settings-store.js';
 import { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.js';
-import { classifyTask, type TaskClassification } from './observability/task-classifier.js';
+import { classifyTask, shouldSkipRetrievalForSmalltalk, type TaskClassification } from './observability/task-classifier.js';
 import { decideRoute, DEFAULT_TASK_MODEL_MAP, type RoutingDecision } from './observability/model-routing-engine.js';
 import { SCENARIOS as _VALIDATION_SCENARIOS } from './observability/validation-scenarios.js';
 import { TelemetryStore } from './observability/telemetry-store.js';
@@ -1213,6 +1213,17 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     // Batch A2 — reset private-memory decision trace + sufficiency.
     this._decisionTrace.reset();
     this._lastSufficiencyDecision = null;
+
+    // P13 fix — smalltalk gate. Greetings / fillers ("hello", "thanks")
+    // must never hit the corpus: "hello" semantically matches every
+    // email opening "Hello Darren…" and floods the chat UI with a
+    // 10-document evidence panel for a greeting. Reset above still ran,
+    // so no stale evidence from the previous turn lingers either.
+    if (shouldSkipRetrievalForSmalltalk(input)) {
+      log.debug({ query: input.slice(0, 40) }, 'retrieval skipped: smalltalk/filler');
+      return null;
+    }
+
     this._decisionTrace.emit({ event: 'retrieval_started', query: input });
 
     const start = Date.now();

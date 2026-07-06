@@ -189,3 +189,23 @@ describe('P12-1 decideRoute step 2.5 — task defaults', () => {
     expect(d.model).toBe(HEAVY);
   });
 });
+
+describe('P13 fix — smalltalk retrieval gate', () => {
+  it('skips retrieval for greetings and fillers', async () => {
+    const { shouldSkipRetrievalForSmalltalk } = await import('../../src/observability/task-classifier.js');
+    expect(shouldSkipRetrievalForSmalltalk('hello')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('Hello!')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('thanks')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('ok')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('Good morning')).toBe(true);
+    expect(shouldSkipRetrievalForSmalltalk('how are you today?')).toBe(true);
+  });
+
+  it('does NOT skip retrieval for real questions (incl. ones containing greetings)', async () => {
+    const { shouldSkipRetrievalForSmalltalk } = await import('../../src/observability/task-classifier.js');
+    expect(shouldSkipRetrievalForSmalltalk('What were the Brixton network issues?')).toBe(false);
+    expect(shouldSkipRetrievalForSmalltalk('From my documents, what was said about induction training?')).toBe(false);
+    expect(shouldSkipRetrievalForSmalltalk('Find the email where Penny says hello and mentions FTTP')).toBe(false);
+    expect(shouldSkipRetrievalForSmalltalk('Summarise the tribunal hearing bundle')).toBe(false);
+  });
+});

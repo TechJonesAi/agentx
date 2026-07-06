@@ -98,6 +98,23 @@ const RULES: Array<{ task: TaskType; weight: number; pattern: RegExp; label: str
   { task: 'chat', weight: 6, pattern: /^\s*(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))\b|\btell\s+me\s+a\s+joke\b|\bhow\s+are\s+you\b/i, label: 'smalltalk' },
 ];
 
+/**
+ * P13 fix — Retrieval gate for smalltalk. Greetings, fillers, and pure
+ * conversational openers must NOT hit the document corpus: "hello"
+ * semantically matches every email that opens "Hello Darren", flooding
+ * the chat UI with a 10-document evidence panel for a greeting.
+ *
+ * True when the message is an anchored filler (fast-response) or an
+ * explicit smalltalk opener — the same positive-evidence signals the
+ * router uses, so gating stays consistent with routing.
+ */
+export function shouldSkipRetrievalForSmalltalk(input: string): boolean {
+  const c = classifyTask(input);
+  if (c.primary === 'fast-response') return true;
+  if (c.primary === 'chat' && c.signals.some((s) => s.startsWith('smalltalk'))) return true;
+  return false;
+}
+
 /** Classify a message. Returns the highest-scoring task type. Ties broken
  *  by rule order. Defaults to 'chat' with confidence 0.5 when nothing matches. */
 export function classifyTask(input: string): TaskClassification {
