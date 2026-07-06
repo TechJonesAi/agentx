@@ -68,9 +68,15 @@ export function getMemoryServiceDefinition(
 
   const cwd = resolveMemoryCorePath();
 
+  // Bare 'python3' can resolve to Xcode's Python 3.9, which cannot evaluate
+  // modern type annotations (list[str] | None) — prefer Homebrew's python3.
+  const python =
+    process.env['AGENTX_MEMORY_PYTHON'] ??
+    (fs.existsSync('/opt/homebrew/bin/python3') ? '/opt/homebrew/bin/python3' : 'python3');
+
   return {
     name: 'memory-api',
-    command: 'python3',
+    command: python,
     args: [
       '-m', 'uvicorn',
       'agentx_memory.api.server:app',

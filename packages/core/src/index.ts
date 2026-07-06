@@ -256,3 +256,9 @@ export type {
   StreamCallbacks,
   TranscriptEntry,
 } from './types.js';
+
+// ─── Service supervision (Memory API sidecar) ────────────────────────────
+export { ServiceSupervisor } from './services/supervisor.js';
+export type { ServiceDefinition } from './services/supervisor.js';
+export { ensureMemoryApi, getMemoryServiceDefinition } from './services/ensure-memory.js';
+export type { MemoryServiceConfig } from './services/ensure-memory.js';

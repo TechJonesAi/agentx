@@ -9,7 +9,7 @@
  * Constructs an Agent + WebServer and handles graceful shutdown.
  */
 
-import { Agent, createLogger } from '@agentx/core';
+import { Agent, createLogger, ServiceSupervisor, ensureMemoryApi } from '@agentx/core';
 import { WebServer } from './server/index.js';
 
 const log = createLogger('web:serve');
@@ -22,6 +22,14 @@ async function main(): Promise<void> {
   const server = new WebServer({ port, host, agent });
   await server.start();
 
+  // Memory API sidecar (:8100) — supervised child with health checks and
+  // auto-restart. Fire-and-forget: the dashboard must never wait on it.
+  const supervisor = new ServiceSupervisor();
+  void ensureMemoryApi(supervisor).catch((err) =>
+    log.warn({ error: err instanceof Error ? err.message : String(err) },
+      'Memory API sidecar unavailable — continuing without it'),
+  );
+
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
   console.log(`AgentX Web UI running on http://${displayHost}:${port}`);
 
@@ -30,6 +38,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info('Shutting down web server…');
+    await supervisor.stopAll().catch(() => undefined);
     await server.stop();
     await agent.shutdown?.();
     process.exit(0);

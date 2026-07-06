@@ -127,13 +127,22 @@ while true; do
   MEMORY_PORT="${AGENTX_MEMORY_API_PORT:-8100}"
   MEMORY_SRC="$PROJECT_ROOT/packages/memory-core/src/agentx_memory/api/server.py"
   if [[ -f "$MEMORY_SRC" ]] && ! check_http "http://127.0.0.1:${MEMORY_PORT}/health"; then
-    wd_log "Memory API (port $MEMORY_PORT) not responding — checking if server should restart it"
-    # Memory API is managed by ServiceSupervisor inside the web server.
-    # If web server is healthy but memory API is not, nudge it via the
-    # cognitive status endpoint which triggers lazy re-init.
-    if check_http "http://${AGENTX_HOST}:${AGENTX_PORT}/api/health"; then
-      /usr/bin/curl -sf --max-time 5 "http://${AGENTX_HOST}:${AGENTX_PORT}/api/cognitive/status" &>/dev/null || true
-      wd_log "Memory API recovery nudge sent via cognitive/status"
+    wd_log "Memory API (port $MEMORY_PORT) down — restarting..."
+    # Primary owner is the ServiceSupervisor inside the web server, but if
+    # it exhausted its restart budget (or the web server predates the
+    # supervisor wiring) the watchdog spawns uvicorn directly.
+    mem_pids=$(/usr/sbin/lsof -ti:"$MEMORY_PORT" 2>/dev/null || true)
+    if [[ -n "$mem_pids" ]]; then
+      echo "$mem_pids" | xargs kill 2>/dev/null || true
+      sleep 1
+    fi
+    (cd "$PROJECT_ROOT/packages/memory-core/src" && \
+      nohup /opt/homebrew/bin/python3 -m uvicorn agentx_memory.api.server:app \
+        --host 127.0.0.1 --port "$MEMORY_PORT" >> "$LOG_DIR/memory-api.log" 2>&1 &)
+    wd_log "Memory API restarted via uvicorn"
+    sleep 5
+    if check_http "http://127.0.0.1:${MEMORY_PORT}/health"; then
+      wd_log "Memory API recovered"
     fi
   fi
 
