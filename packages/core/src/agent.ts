@@ -38,6 +38,9 @@ import { KnowledgeProbe } from './reasoning/knowledge-probe.js';
 import { detectRedFlag, type RedFlagResult } from './reasoning/redflag-gate.js';
 import { DecisionEngine, type DecisionEngineInput, type DecisionSummary, type ExecutionTrace } from './reasoning/decision-engine.js';
 import { RetrievalService } from './retrieval/retrieval-service.js';
+import { ContinuousContextStore } from './memory/continuous-context.js';
+import { PlaybookStore } from './memory/playbook-store.js';
+import { ToolForge, buildForgeDraftTool, buildForgeListTool } from './tools/tool-forge.js';
 import { extractSnippet } from './retrieval/snippet-extractor.js';
 import {
   assessRetrievalSufficiency,
@@ -112,7 +115,7 @@ import { HealthMonitor } from './observability/health-monitor.js';
 import { RuntimeSettingsStore } from './observability/runtime-settings-store.js';
 import { RetrievalOutcomeStore } from './observability/retrieval-outcome-store.js';
 import { classifyTask, type TaskClassification } from './observability/task-classifier.js';
-import { decideRoute, type RoutingDecision } from './observability/model-routing-engine.js';
+import { decideRoute, DEFAULT_TASK_MODEL_MAP, type RoutingDecision } from './observability/model-routing-engine.js';
 import { SCENARIOS as _VALIDATION_SCENARIOS } from './observability/validation-scenarios.js';
 import { TelemetryStore } from './observability/telemetry-store.js';
 import { WorkflowRunStore } from './observability/workflow-run-store.js';
@@ -265,6 +268,12 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   // R2/R3: Retrieval integration
   private _retrievalEnabled = false;
   private _retrievalService: RetrievalService | null = null;
+  /** P12-2 — Continuous-context durability layer (archive + bridge + journal). */
+  private _continuousContext: ContinuousContextStore | null = null;
+  /** P12-3 — Playbooks: success memory (proven approaches per task type). */
+  private _playbooks: PlaybookStore | null = null;
+  /** P12-4 — Tool Forge: draft / approve / run sandboxed custom tools. */
+  private _toolForge: ToolForge | null = null;
   private _lastRetrievalIntent: QueryIntent | null = null;
   private _lastRetrievalResults: RetrievalResult[] = [];
   private _lastRetrievalMetadata: RetrievalMetadata | null = null;
@@ -482,6 +491,64 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
     // Batch A2 — Private-memory-first / localOnly state.
     this._localOnly = this.config.agent.localOnly === true;
+
+    // ── P12-2: Continuous Context — durability layer ─────────────────
+    // Archive summarised-out turns (never lose the thread), bridge new
+    // sessions with the previous session's recap, and keep a structured
+    // decision journal. Best-effort by design: any failure here logs
+    // and chat continues unaffected.
+    try {
+      this._continuousContext = new ContinuousContextStore(this.db);
+      this.contextManager.setArchiveSink((sessionId, olderMessages, summary, batchId) => {
+        const res = this._continuousContext!.archiveCompactedTurns(sessionId, olderMessages, summary, batchId);
+        if (res.archived > 0) {
+          this._continuousContext!.recordDecision(
+            'compaction',
+            `Compacted ${olderMessages.length} turns out of the window (archived + indexed)`,
+            { batchId, archived: res.archived },
+            sessionId,
+          );
+        }
+      });
+      log.info('P12-2: ContinuousContextStore wired (archive + bridge + journal)');
+    } catch (ccErr) {
+      log.warn(
+        { err: ccErr instanceof Error ? ccErr.message : String(ccErr) },
+        'P12-2: ContinuousContextStore init failed — durability layer disabled',
+      );
+    }
+
+    // ── P12-3: Playbooks — success memory ────────────────────────────
+    // Records what worked per (task type, query signature); recalls the
+    // proven approach on similar future requests. Best-effort.
+    try {
+      this._playbooks = new PlaybookStore(this.db);
+      log.info('P12-3: PlaybookStore wired (success memory)');
+    } catch (pbErr) {
+      log.warn(
+        { err: pbErr instanceof Error ? pbErr.message : String(pbErr) },
+        'P12-3: PlaybookStore init failed — success memory disabled',
+      );
+    }
+
+    // ── P12-4: Tool Forge — draft / approve / run custom tools ───────
+    // The model can DRAFT pure-compute utility tools mid-conversation
+    // (stored pending); only a human approval makes them executable.
+    // Approved tools re-register at every boot. Sandboxed via node:vm
+    // with an empty context + static deny-list + 1s timeout +
+    // auto-disable after 3 consecutive failures.
+    try {
+      this._toolForge = new ToolForge(this.db, this.toolRegistry);
+      const loaded = this._toolForge.loadApprovedTools();
+      this.toolRegistry.register(buildForgeDraftTool(this._toolForge));
+      this.toolRegistry.register(buildForgeListTool(this._toolForge));
+      log.info({ approvedLoaded: loaded }, 'P12-4: ToolForge wired (forge_tool + list_custom_tools registered)');
+    } catch (tfErr) {
+      log.warn(
+        { err: tfErr instanceof Error ? tfErr.message : String(tfErr) },
+        'P12-4: ToolForge init failed — custom tools disabled',
+      );
+    }
 
     // R2: Initialize retrieval integration if enabled
     if (this.config.agent.retrieval?.enabled) {
@@ -1245,6 +1312,70 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     }
   }
 
+  /**
+   * P12-2 — Archive recall. When the user's query references past
+   * conversation ("what did we decide…", "as discussed", "last time")
+   * OR shares ≥2 content words with archived turns, surface the top
+   * archived hits as a compact prompt block. Nothing summarised out of
+   * the window is ever unreachable. Best-effort; returns '' on any
+   * failure. Cheap: one FTS query, only runs when the store exists.
+   */
+  private _buildArchiveRecallBlock(input: string): string {
+    if (!this._continuousContext) return '';
+    try {
+      // Gate: only search the archive when the query plausibly refers
+      // back to earlier conversation — avoids prompt noise on ordinary
+      // doc/QA turns.
+      const refersBack =
+        /\b(?:what\s+did\s+we|as\s+(?:we\s+)?discussed|last\s+(?:time|session|week)|earlier\s+(?:you|we)|previously|remind\s+me|we\s+(?:decided|agreed|talked)|did\s+(?:you|we)\s+(?:say|mention))\b/i.test(input);
+      if (!refersBack) return '';
+      const hits = this._continuousContext.searchArchive(input, 4);
+      if (hits.length === 0) return '';
+      const lines = hits.map((h) => {
+        const when = new Date(h.turn_timestamp).toISOString().slice(0, 16).replace('T', ' ');
+        const text = h.content.replace(/\s+/g, ' ').slice(0, 260);
+        return `- [${h.kind === 'summary' ? 'session summary' : h.role} @ ${when}] ${text}`;
+      });
+      return `\n\n--- Recalled From Earlier Conversations (${hits.length}) ---\n${lines.join('\n')}\n--- End Recalled Context ---`;
+    } catch {
+      return '';
+    }
+  }
+
+  /** P12-2 — accessor for the durability layer (API / dashboard). */
+  getContinuousContext(): ContinuousContextStore | null { return this._continuousContext; }
+
+  /** P12-3 — accessor for the success-memory layer (API / dashboard). */
+  getPlaybooks(): PlaybookStore | null { return this._playbooks; }
+
+  /** P12-4 — accessor for the tool forge (API / dashboard / approval UI). */
+  getToolForge(): ToolForge | null { return this._toolForge; }
+
+  /**
+   * P12-3 — Record the outcome of a completed chat turn into the
+   * playbook store. Model comes from this turn's routing-history entry
+   * (both chat paths record one); retrieval stats from the last run.
+   * Best-effort: never throws.
+   */
+  private _recordPlaybookOutcome(input: string, responseContent: string, sessionId: string): void {
+    if (!this._playbooks) return;
+    try {
+      const classification = classifyTask(input);
+      const current = ModelRoutingHistory.getInstance().current();
+      const model = current?.model ?? this.getActiveModel().model;
+      this._playbooks.recordOutcome({
+        taskType: classification.primary,
+        query: input,
+        model,
+        success: responseContent.trim().length > 0 && !responseContent.startsWith('[Locked]'),
+        retrievalSource: this._lastRetrievalStats?.source ?? null,
+        retrievalMatchCount: this._lastRetrievalStats?.matchCount ?? null,
+        responseChars: responseContent.length,
+        sessionId,
+      });
+    } catch { /* learning must never break a turn */ }
+  }
+
   getLastRetrievalIntent(): QueryIntent | null { return this._lastRetrievalIntent; }
   getLastRetrievalResults(): RetrievalResult[] { return this._lastRetrievalResults; }
   getLastRetrievalMetadata(): RetrievalMetadata | null { return this._lastRetrievalMetadata; }
@@ -1257,7 +1388,21 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
   /** R11: record a thumbs-up/down on a chat response. Validates payload — throws on bad input. */
   recordFeedback(payload: FeedbackPayload): FeedbackRecord {
-    return this._feedbackStore.record(payload);
+    const record = this._feedbackStore.record(payload);
+    // P12-3 — User verdicts are the strongest learning signal: move the
+    // matching playbook's confidence hard. A downvoted approach whose
+    // confidence falls below 0.4 loses its model bias entirely.
+    try {
+      if (this._playbooks && payload.userQuery) {
+        const classification = classifyTask(payload.userQuery);
+        this._playbooks.applyFeedback(
+          classification.primary,
+          payload.userQuery,
+          payload.rating === 'up',
+        );
+      }
+    } catch { /* best-effort */ }
+    return record;
   }
   /** R11: list recent feedback records (newest first). */
   listFeedback(limit = 100): FeedbackRecord[] { return this._feedbackStore.list(limit); }
@@ -1601,7 +1746,84 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     systemPrompt?: string;
     tools?: import('./types.js').ToolDefinition[];
     capability?: 'reasoning';
+    /** Per-call model override. When set, routing is skipped. */
+    model?: string;
   }): Promise<LLMResponse> {
+    // ── P12-1: Task-aware model routing (non-streaming path) ─────────
+    // Before P12-1 only chatStream() routed; every non-stream call went
+    // to the fixed default model. Route here so ALL completions benefit.
+    // Skipped when the caller already set an explicit model, or when the
+    // intelligence layer forced 'reasoning' capability (accuracy-first).
+    if (!options.model && options.capability !== 'reasoning') {
+      try {
+        const lastUser = [...options.messages].reverse().find((m) => m.role === 'user');
+        const userText = typeof lastUser?.content === 'string' ? lastUser.content : '';
+        if (userText.length > 0) {
+          const settings = RuntimeSettingsStore.getInstance().get();
+          const active = this.getActiveModel();
+          const classification = classifyTask(userText);
+          // P12-3 — Playbook recall. A proven approach for this kind of
+          // request contributes two things:
+          //   1. hint — appended to the system prompt (always, on match)
+          //   2. model — prepended to the preferred-models list ONLY when
+          //      the evidence gate is met (conf ≥ 0.8, ≥ 3 successes).
+          //      Going through the preferred slot means it inherits ALL
+          //      routing guards (disabled / not-installed / degraded).
+          let playbookPreferred: string[] = [];
+          try {
+            const match = this._playbooks?.findBest(classification.primary, userText) ?? null;
+            if (match) {
+              const hint = this._playbooks!.renderHintBlock(match);
+              options = { ...options, systemPrompt: (options.systemPrompt ?? '') + hint };
+              if (match.modelBiasEligible && match.playbook.model) {
+                playbookPreferred = [match.playbook.model];
+                log.info(
+                  { taskType: classification.primary, model: match.playbook.model, confidence: match.playbook.confidence, overlap: match.overlap },
+                  'P12-3: playbook model bias engaged',
+                );
+              }
+            }
+          } catch { /* playbooks are best-effort */ }
+          const decision = decideRoute({
+            classification,
+            defaultProvider: active.provider,
+            defaultModel: active.model,
+            pins: settings.modelPins,
+            preferredModels: [...playbookPreferred, ...settings.preferredModels],
+            disabledModels: settings.disabledModels,
+            localOnly: active.localOnly,
+            installedLocalModels: this._installedLocalModelCache ?? [],
+            reliabilityAware: settings.autoRoutingMode === 'reliability-aware',
+            taskDefaults: DEFAULT_TASK_MODEL_MAP,
+            perModelHealth: TelemetryStore.getInstance().perModelHealth(),
+          });
+          if (decision.model && decision.model !== active.model) {
+            options = { ...options, model: decision.model };
+            log.info(
+              { taskType: decision.taskType, model: decision.model, reason: decision.reason },
+              'P12-1: non-stream completion routed by task type',
+            );
+          }
+          ModelRoutingHistory.getInstance().record({
+            taskType: decision.taskType,
+            model: decision.model,
+            provider: decision.provider,
+            reason: `non-stream: ${decision.reason}`,
+            fallbackUsed: decision.fallbackChain.length > 0,
+            localOnly: active.localOnly,
+            toolCallingEnabled: (options.tools?.length ?? 0) > 0,
+          });
+        }
+      } catch (routeErr) {
+        // Routing must NEVER break a completion — fall through to the
+        // default model on any classification/registry error.
+        log.warn(
+          { err: routeErr instanceof Error ? routeErr.message : String(routeErr) },
+          'P12-1: non-stream routing threw — using default model',
+        );
+      }
+    }
+
     // Estimate tokens for rate limiting
     const estimatedTokens = this.contextManager.estimateTokenCount(options.messages);
 
@@ -1862,6 +2084,13 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     const abortController = new AbortController();
     this.sessionAbortControllers.set(session.id, abortController);
 
+    // P12-2 — Session bridge detection: a session with no prior turns
+    // is a fresh start. If earlier sessions left an archive, prepare a
+    // compact recap for injection into the system prompt below so the
+    // new session never boots as a blank slate.
+    const _wasFreshSession =
+      this.conversationMemory.getMessages(session.id).length === 0;
+
     const userMessage: Message = {
       role: 'user',
       content: input,
@@ -1917,7 +2146,32 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     this._runIntelligenceObservation(input);
 
     const retrievalContext = await this._buildRetrievalContext(input);
-    const augmentedSystemPrompt = retrievalContext ? this.systemPrompt + retrievalContext : this.systemPrompt;
+
+    // P12-2 — Inject the previous-session recap on the FIRST turn of a
+    // fresh session. Capped (~1.2k chars) so prompt overhead stays low.
+    let bridgeBlock = '';
+    if (_wasFreshSession && this._continuousContext) {
+      try {
+        const bridge = this._continuousContext.getBridgeContext(session.id);
+        if (bridge) {
+          bridgeBlock = '\n\n' + this._continuousContext.renderBridgeBlock(bridge);
+          this._continuousContext.recordDecision(
+            'session_bridge',
+            `New session bridged with recap from ${bridge.lastSessionId ?? 'journal'}`,
+            { fromSession: bridge.lastSessionId },
+            session.id,
+          );
+          log.info({ sessionId: session.id, fromSession: bridge.lastSessionId }, 'P12-2: session bridged with previous recap');
+        }
+      } catch { /* bridge is best-effort */ }
+    }
+
+    // P12-2 — archive recall: queries that refer back to earlier
+    // conversation pull the original archived turns into context.
+    const archiveRecall = this._buildArchiveRecallBlock(input);
+
+    const augmentedSystemPrompt =
+      this.systemPrompt + (retrievalContext ?? '') + bridgeBlock + archiveRecall;
 
     let response: LLMResponse;
     try {
@@ -2079,6 +2333,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       success: true,
     });
 
+    // P12-3 — Learn from this turn. A completed, non-empty response is
+    // a success signal for the (task type, query signature) playbook.
+    this._recordPlaybookOutcome(input, finalResponse.content, session.id);
+
     return finalResponse.content;
   }
 
@@ -2093,6 +2351,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     this.localAuth.touch();
 
     const session = this.sessionManager.getOrCreate(sessionId);
+
+    // P12-2 — fresh-session detection for the bridge (see chat()).
+    const _wasFreshSessionStream =
+      this.conversationMemory.getMessages(session.id).length === 0;
 
     const userMessage: Message = {
       role: 'user',
@@ -2179,7 +2441,26 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     } else {
       this._decisionTrace.emit({ event: 'retrieval_sufficiency_decision', sufficient: false, reason: 'retrieval_disabled_setting' } as never);
     }
-    const augmentedSystemPromptStream = retrievalContextStream ? this.systemPrompt + retrievalContextStream : this.systemPrompt;
+    // P12-2 — session bridge + archive recall (stream path).
+    let bridgeBlockStream = '';
+    if (_wasFreshSessionStream && this._continuousContext) {
+      try {
+        const bridge = this._continuousContext.getBridgeContext(session.id);
+        if (bridge) {
+          bridgeBlockStream = '\n\n' + this._continuousContext.renderBridgeBlock(bridge);
+          this._continuousContext.recordDecision(
+            'session_bridge',
+            `New session bridged with recap from ${bridge.lastSessionId ?? 'journal'}`,
+            { fromSession: bridge.lastSessionId },
+            session.id,
+          );
+        }
+      } catch { /* best-effort */ }
+    }
+    const archiveRecallStream = this._buildArchiveRecallBlock(input);
+
+    const augmentedSystemPromptStream =
+      this.systemPrompt + (retrievalContextStream ?? '') + bridgeBlockStream + archiveRecallStream;
     // R3: emit retrieval event BEFORE any model token streaming begins.
     if (this._lastRetrievalMetadata && callbacks.onRetrieval) {
       callbacks.onRetrieval(this._lastRetrievalMetadata);
@@ -2200,6 +2481,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       localOnly: active.localOnly,
       installedLocalModels: this._installedLocalModelCache ?? [],
       reliabilityAware: settings.autoRoutingMode === 'reliability-aware',
+      // P12-1 — task-aware model defaults: light tasks route to fast
+      // models; document / legal / medical / reasoning tasks stay on
+      // the heavy default. User pins + preferred-models still win.
+      taskDefaults: DEFAULT_TASK_MODEL_MAP,
       // Batch 6D — telemetry-driven model demotion. perModelHealth feeds
       // p95 latency + success rate so routing prefers healthy models.
       perModelHealth: TelemetryStore.getInstance().perModelHealth(),
@@ -2341,6 +2626,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         (last as { groundedAnswer: boolean | null }).groundedAnswer = cited;
       }
     }
+
+    // P12-3 — Learn from this streamed turn (see chat()).
+    this._recordPlaybookOutcome(input, finalResponse.content, session.id);
 
     return finalResponse.content;
   }

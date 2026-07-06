@@ -1,7 +1,13 @@
 agent:
   name: AgentX
-  defaultProvider: anthropic
-  model: claude-sonnet-4-20250514
+  # P12-1 — Local-first: Ollama is the default provider. The heavy
+  # reasoning model (llama3.3:70b) is the DEFAULT; the task-aware
+  # routing engine (DEFAULT_TASK_MODEL_MAP) automatically switches
+  # light tasks (chat / summaries / fillers) to faster local models
+  # and code to the coder — while legal / medical / document QA
+  # stays on the 70b for accuracy.
+  defaultProvider: ollama
+  model: llama3.3:70b-instruct-q4_K_M
   intelligence:
     enabled: false
     observationOnly: true
@@ -19,7 +25,7 @@ providers:
     model: gpt-4o
     maxTokens: 4096
   ollama:
-    model: llama3
+    model: llama3.3:70b-instruct-q4_K_M
     baseUrl: http://localhost:11434
 
 memory:

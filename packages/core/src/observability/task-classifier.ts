@@ -49,8 +49,11 @@ const RULES: Array<{ task: TaskType; weight: number; pattern: RegExp; label: str
   { task: 'vision', weight: 5, pattern: /\b(image|photo|screenshot|picture|visual)\b/i, label: 'image-keyword' },
   { task: 'multimodal', weight: 3, pattern: /\b(audio|video|voice|speech)\b/i, label: 'multimodal-keyword' },
 
-  // Summarisation
-  { task: 'summarisation', weight: 4, pattern: /\b(summari[sz]e|tl;dr|in\s+(one|a\s+few)\s+sentences|key\s+points|condense)\b/i, label: 'summarise-verb' },
+  // Summarisation — weight 6 clears the P12-1 routing confidence gate
+  // (0.6) so plain summaries ride the fast lane. Doc-grounded signals
+  // are weight 7 (strictly higher) so "summarise the tribunal bundle"
+  // still routes heavy.
+  { task: 'summarisation', weight: 6, pattern: /\b(summari[sz]e|tl;dr|in\s+(one|a\s+few)\s+sentences|key\s+points|condense)\b/i, label: 'summarise-verb' },
 
   // Reasoning / deep analysis
   { task: 'reasoning', weight: 4, pattern: /\b(why\s+(does|is|did)|explain\s+(why|how)|reason\s+about|step\s+by\s+step|chain\s+of\s+thought)\b/i, label: 'reasoning-verb' },
@@ -59,6 +62,21 @@ const RULES: Array<{ task: TaskType; weight: number; pattern: RegExp; label: str
   // Retrieval-grounded QA — cites memory/docs
   { task: 'retrieval-grounded-qa', weight: 5, pattern: /\[(MEM|DOC)-\d+\]/i, label: 'citation-marker' },
   { task: 'retrieval-grounded-qa', weight: 3, pattern: /\b(based\s+on|according\s+to)\s+(my|the)\s+(notes|memory|documents|files)\b/i, label: 'cite-source-verb' },
+  // P12-1 — Document-grounded query signals. These queries MUST route to
+  // the heavy reasoning model (legal/medical accuracy is non-negotiable),
+  // so they must never fall through to 'chat' and get fast-laned:
+  //   • explicit filename mention ("In Blackstone.pdf, …")
+  //   • structural anchors (clause / section / article N — statute-speak)
+  //   • legal / medical / tribunal terms of art
+  //   • corpus phrasing ("in my documents / emails / library")
+  // Weight 7 (strictly > every task-verb rule incl. summarisation at 6)
+  // so a doc-grounded signal ALWAYS out-scores verbs — "Summarise the
+  // tribunal bundle" must stay on the heavy model, not the fast lane.
+  { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b[\w][\w\s'-]{0,40}\.(?:pdf|docx?|eml|png|jpe?g|txt)\b/i, label: 'filename-mention' },
+  { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:clause|section|article|paragraph|schedule|annex)\s+\d{1,4}\b/i, label: 'statute-anchor' },
+  { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:tribunal|claimant|respondent|statute|magna\s+carta|et1|acas|dismissal|discrimination|reasonable\s+adjustments?|witness\s+statement|hearing\s+bundle)\b/i, label: 'legal-term' },
+  { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:diagnosis|patient|clinical|prognosis|gmc|prescription|symptom)\b/i, label: 'medical-term' },
+  { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:in|from|across|search)\s+my\s+(?:stored\s+)?(?:documents?|files?|e-?mails?|library|inbox|messages)\b/i, label: 'corpus-phrase' },
   { task: 'memory-intensive', weight: 3, pattern: /\b(remember\s+when|earlier\s+(you|we)\s+(said|discussed|mentioned))\b/i, label: 'memory-recall' },
 
   // Tool-heavy
@@ -67,9 +85,17 @@ const RULES: Array<{ task: TaskType; weight: number; pattern: RegExp; label: str
   // Autonomous repair
   { task: 'autonomous-repair', weight: 5, pattern: /\b(self-?repair|auto-?repair|heal|fix\s+yourself|fix\s+the\s+system)\b/i, label: 'repair-verb' },
 
-  // Fast-response — short conversational fillers only. Tight to avoid
-  // swallowing real questions like "Hello, how are you?".
-  { task: 'fast-response', weight: 2, pattern: /^\s*(yes|no|ok|okay|sure|thanks|thx|ty|nope|yep|hi|hey)[!.?\s]*$/i, label: 'short-filler' },
+  // Fast-response — short conversational fillers only. The regex is
+  // fully anchored (entire message must be a filler) so false positives
+  // are impossible; weight 6 clears the P12-1 routing confidence gate.
+  { task: 'fast-response', weight: 6, pattern: /^\s*(yes|no|ok|okay|sure|thanks|thx|ty|nope|yep|hi|hey)[!.?\s]*$/i, label: 'short-filler' },
+
+  // P12-1 — Positive smalltalk signals. 'chat' is otherwise the no-match
+  // DEFAULT (confidence 0.5, below the routing gate → heavy model). Only
+  // explicit greeting / smalltalk phrasing earns the fast lane; anything
+  // ambiguous stays on the heavy default for accuracy. Fast requires
+  // positive evidence — never a guess.
+  { task: 'chat', weight: 6, pattern: /^\s*(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))\b|\btell\s+me\s+a\s+joke\b|\bhow\s+are\s+you\b/i, label: 'smalltalk' },
 ];
 
 /** Classify a message. Returns the highest-scoring task type. Ties broken

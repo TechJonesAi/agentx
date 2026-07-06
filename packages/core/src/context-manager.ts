@@ -69,12 +69,26 @@ export interface ContextWindowResult {
 
 type SummarizeFn = (messages: Message[]) => Promise<string>;
 
+/**
+ * P12-2 — Archive sink. When compaction summarises older turns out of
+ * the window, the sink receives (sessionId, summarised-out messages,
+ * summary, batchId) so a durability layer can persist + index them.
+ * Optional: when unset, behaviour is identical to pre-P12-2.
+ */
+type ArchiveSinkFn = (
+  sessionId: string,
+  olderMessages: Message[],
+  summary: string | null,
+  batchId: string,
+) => void;
+
 // ─── Context Manager ────────────────────────────────────────────────────────
 
 export class ContextManager {
   private config: ContextManagerConfig;
   private summarize: SummarizeFn | null = null;
   private summaryCache = new Map<string, string>(); // sessionId -> latest summary
+  private archiveSink: ArchiveSinkFn | null = null;
 
   constructor(providerName?: string, config?: Partial<ContextManagerConfig>) {
     const providerLimit = DEFAULT_CONTEXT_LIMITS[providerName ?? 'anthropic'] ?? 200_000;
@@ -87,6 +101,12 @@ export class ContextManager {
 
   setSummarizer(fn: SummarizeFn): void {
     this.summarize = fn;
+  }
+
+  /** P12-2 — wire the durability layer. Best-effort: sink errors are
+   *  swallowed so archiving can never break context preparation. */
+  setArchiveSink(fn: ArchiveSinkFn): void {
+    this.archiveSink = fn;
   }
 
   /**
@@ -158,6 +178,20 @@ export class ContextManager {
           summarizedMessages: olderMessages.length,
           summaryLength: summary.length,
         }, 'Conversation summary generated');
+        // P12-2 — Durability: persist the summarised-out turns + the
+        // summary so nothing compacted out of the window is ever
+        // unrecoverable. batchId = sessionId + first/last timestamps,
+        // so re-summarising the same span is deduped by the sink.
+        if (this.archiveSink) {
+          try {
+            const first = olderMessages[0]?.timestamp ?? 0;
+            const last = olderMessages[olderMessages.length - 1]?.timestamp ?? 0;
+            const batchId = `${sessionId}:${first}:${last}:${olderMessages.length}`;
+            this.archiveSink(sessionId, olderMessages, summary, batchId);
+          } catch (sinkErr) {
+            log.warn({ sessionId, sinkErr }, 'P12-2 archive sink threw — ignored');
+          }
+        }
       } catch (error) {
         log.error({ sessionId, error }, 'Failed to generate summary');
       }

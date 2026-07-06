@@ -65,6 +65,14 @@ export interface RoutingInputs {
   /** Optional override map: provider name → default model when promotion
    *  fires (e.g. omlx → "mlx-community/Llama-3.2-3B-Instruct-4bit"). */
   providerDefaultModel?: Record<string, string>;
+  /**
+   * P12-1 — Task-type → model defaults. When neither a pin nor a
+   * preferred-model matched, the engine consults this map before
+   * falling back to defaultModel. Pass DEFAULT_TASK_MODEL_MAP (or a
+   * settings-derived override). Omit / empty → legacy behaviour
+   * (everything routes to defaultModel).
+   */
+  taskDefaults?: Partial<Record<TaskType, string>>;
 }
 
 export interface RoutingDecision {
@@ -78,6 +86,44 @@ export interface RoutingDecision {
 }
 
 const LOCAL_PROVIDERS = new Set(['ollama', 'local', 'llama-cpp']);
+
+/**
+ * P12-1 — Built-in task→model defaults ("the missing step 2.5").
+ *
+ * Before P12-1, the engine classified every message into one of 13 task
+ * types, recorded the classification — and then routed everything to the
+ * defaultModel anyway unless the user manually pinned each type in the
+ * UI. This map gives the engine an OPINION: light conversational tasks
+ * go to fast models, code goes to the coder, vision to the VL model,
+ * and anything touching documents / legal / medical / deep reasoning
+ * stays on the heavy default (llama3.3:70b) where accuracy is
+ * non-negotiable.
+ *
+ * Calibrated for the user's fleet on an M4 Max / 128GB:
+ *   - llama3.1:8b        4.9 GB  — instant acknowledgements
+ *   - qwen3:30b-a3b     18.6 GB  — MoE, ~3B active params, ~5-6× faster
+ *                                   than the 70b at near-frontier chat
+ *                                   quality (July 2025 instruct)
+ *   - qwen3-coder:30b   18.6 GB  — code specialist
+ *   - qwen3-vl:32b      20.9 GB  — vision
+ * Heavy tasks intentionally ABSENT from this map → they fall through to
+ * the defaultModel (llama3.3:70b): retrieval-grounded-qa, reasoning,
+ * deep-analysis, memory-intensive, tool-heavy, autonomous-repair,
+ * builder (builder chains into tool-heavy work).
+ *
+ * User pins ALWAYS beat these defaults (step 1 in decideRoute). The
+ * preferred-models list also beats them (step 2) since it's an explicit
+ * user choice.
+ */
+export const DEFAULT_TASK_MODEL_MAP: Partial<Record<TaskType, string>> = {
+  'fast-response': 'llama3.1:8b',
+  'chat': 'qwen3:30b-a3b-instruct-2507-q4_K_M',
+  'summarisation': 'qwen3:30b-a3b-instruct-2507-q4_K_M',
+  'coding': 'qwen3-coder:30b',
+  'vision': 'qwen3-vl:32b',
+  'ocr': 'qwen3-vl:32b',
+  'multimodal': 'qwen3-vl:32b',
+};
 
 /** True when telemetry says this model has been consistently slow/failing
  *  and we should prefer something else. Pure helper — no side effects. */
@@ -151,6 +197,39 @@ export function decideRoute(inputs: RoutingInputs): RoutingDecision {
       taskType: t,
       classificationConfidence: inputs.classification.confidence,
     };
+  }
+
+  // 2.5 (P12-1) — Task-type default. The built-in opinion: light tasks
+  // go fast, heavy tasks stay on the default reasoning model. Only
+  // fires when the mapped model survives the same guards as steps 1-2:
+  // not disabled, installed locally (when localOnly + inventory known),
+  // and not telemetry-degraded. Confidence gate: classification must be
+  // ≥ 0.6 — when the classifier is unsure, accuracy wins over speed and
+  // we fall through to the heavy default.
+  const taskDefault = inputs.taskDefaults?.[t];
+  if (taskDefault && taskDefault !== inputs.defaultModel) {
+    if (inputs.classification.confidence < 0.6) {
+      fallbackChain.push({ model: taskDefault, skipped: `task-default skipped: classification confidence ${inputs.classification.confidence} < 0.6` });
+    } else if (inputs.disabledModels.includes(taskDefault)) {
+      fallbackChain.push({ model: taskDefault, skipped: 'task-default disabled' });
+    } else if (inputs.localOnly && inputs.installedLocalModels.length > 0 && !inputs.installedLocalModels.includes(taskDefault)) {
+      fallbackChain.push({ model: taskDefault, skipped: 'task-default not installed locally' });
+    } else {
+      const degr = isDegradedByTelemetry(taskDefault, inputs);
+      if (degr.degraded) {
+        fallbackChain.push({ model: taskDefault, skipped: degr.reason ?? 'telemetry-degraded' });
+      } else {
+        return {
+          model: taskDefault,
+          provider: inputs.defaultProvider,
+          reason: `task-default routing: '${t}' → ${taskDefault} (confidence ${inputs.classification.confidence})`,
+          pinUsed: false,
+          fallbackChain,
+          taskType: t,
+          classificationConfidence: inputs.classification.confidence,
+        };
+      }
+    }
   }
 
   // 3. Default — but verify it isn't disabled.
