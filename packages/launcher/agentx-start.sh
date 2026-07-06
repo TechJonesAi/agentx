@@ -373,6 +373,97 @@ ensure_omlx() {
   return 0
 }
 
+# ─── qwen3-TTS sidecar ─────────────────────────────────────────────────────
+# Premium local voice on :9880 (edge-tts backed). OPTIONAL: when it's
+# down, /api/tts falls back to macos-say — voice still works, just the
+# built-in voice. Self-heals its own missing python dep (edge-tts).
+
+TTS_PORT="${AGENTX_TTS_PORT:-9880}"
+TTS_SCRIPT="$PROJECT_ROOT/packages/launcher/qwen3-tts-server.py"
+TTS_PYTHON="/opt/homebrew/bin/python3"
+
+check_tts() {
+  check_http "http://127.0.0.1:${TTS_PORT}/health" 3
+}
+
+ensure_tts() {
+  if check_tts; then
+    log "qwen3-TTS already running on :${TTS_PORT}"
+    STARTED_SERVICES+=("qwen3-tts")
+    return 0
+  fi
+  if [[ ! -f "$TTS_SCRIPT" || ! -x "$TTS_PYTHON" ]]; then
+    log "qwen3-TTS not available (script or python3 missing — optional; macos-say fallback active)"
+    DEGRADED_SERVICES+=("qwen3-tts")
+    return 0
+  fi
+  # Self-heal the python dependency (root cause of most TTS-down states).
+  if ! "$TTS_PYTHON" -c "import edge_tts" 2>/dev/null; then
+    log "qwen3-TTS dep 'edge-tts' missing — installing (one-time)"
+    status_msg "Installing voice dependencies..."
+    "$TTS_PYTHON" -m pip install --user --break-system-packages --quiet edge-tts \
+      >> "$LOG_DIR/python-deps-install.log" 2>&1 || true
+    if "$TTS_PYTHON" -c "import edge_tts" 2>/dev/null; then
+      REPAIRED_SERVICES+=("edge-tts-dep")
+    else
+      log "WARNING: edge-tts install failed — voice stays on macos-say fallback"
+      DEGRADED_SERVICES+=("qwen3-tts")
+      return 0
+    fi
+  fi
+  if is_port_in_use "$TTS_PORT"; then
+    log "Port $TTS_PORT occupied but unhealthy — cleaning stale TTS"
+    kill_port "$TTS_PORT"
+    REPAIRED_SERVICES+=("tts-stale-cleanup")
+  fi
+  status_msg "Starting voice engine..."
+  nohup "$TTS_PYTHON" "$TTS_SCRIPT" >> "$LOG_DIR/tts-server.log" 2>&1 &
+  local tts_pid=$!
+  log "qwen3-TTS started (PID $tts_pid)"
+  local waited=0
+  while [[ $waited -lt 12 ]]; do
+    if check_tts; then
+      log "qwen3-TTS healthy after ${waited}s"
+      STARTED_SERVICES+=("qwen3-tts")
+      return 0
+    fi
+    if ! is_pid_alive "$tts_pid"; then
+      log "qwen3-TTS process died — see $LOG_DIR/tts-server.log"
+      DEGRADED_SERVICES+=("qwen3-tts")
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  log "qwen3-TTS not healthy within ${waited}s — degraded (macos-say fallback active)"
+  DEGRADED_SERVICES+=("qwen3-tts")
+  return 0
+}
+
+# ─── Watchdog supervisor ───────────────────────────────────────────────────
+# THE self-healing engine between launches. Previously NEVER started by
+# the launcher — all its recovery logic (web restart, TTS restart, oMLX
+# restart, memory nudge) existed but never ran. Exactly one instance.
+
+WATCHDOG_SCRIPT="$SCRIPT_DIR/agentx-watchdog.sh"
+
+ensure_watchdog() {
+  if pgrep -f "agentx-watchdog.sh" &>/dev/null; then
+    log "Watchdog already running"
+    STARTED_SERVICES+=("watchdog")
+    return 0
+  fi
+  if [[ ! -f "$WATCHDOG_SCRIPT" ]]; then
+    log "Watchdog script missing (optional)"
+    DEGRADED_SERVICES+=("watchdog")
+    return 0
+  fi
+  nohup bash "$WATCHDOG_SCRIPT" "$PROJECT_ROOT" >> "$LOG_DIR/watchdog.log" 2>&1 &
+  log "Watchdog started (PID $!) — supervising web/memory/tts/omlx/ollama"
+  STARTED_SERVICES+=("watchdog")
+  return 0
+}
+
 # ─── Health Policy ─────────────────────────────────────────────────────────
 #
 # REQUIRED SERVICES (must be healthy for launch):
@@ -442,10 +533,12 @@ main() {
 
     # Still verify routes
     if check_dashboard_routes; then
-      # P13-A3 — heal optional inference sidecars even on the
-      # already-running fast path, so re-clicking the app icon
-      # restarts a dead oMLX without restarting AgentX itself.
+      # Heal ALL optional sidecars even on the already-running fast
+      # path, so re-clicking the app icon repairs anything dead
+      # without restarting AgentX itself.
       ensure_omlx
+      ensure_tts
+      ensure_watchdog
       status_msg "AgentX already running — opening dashboard"
       open "$AGENTX_DASHBOARD"
       print_summary "RUNNING"
@@ -466,6 +559,7 @@ main() {
   status_msg "Checking services..."
   ensure_ollama
   ensure_omlx
+  ensure_tts
 
   # ─── Phase 4: Start web server (includes memory API via supervisor) ────
   # resilient_start_web_server attempts up to MAX_START_ATTEMPTS (3) times
@@ -479,8 +573,14 @@ main() {
 
   # ─── Phase 5: Wait for memory API (started by web server supervisor) ───
   # Supervisor needs ~25s minimum (20s port bind + uvicorn init). Wait up to 45s.
+  # If the Python source isn't present, the service can't exist — skip the
+  # wait entirely (not a degradation; there is nothing to heal).
   status_msg "Checking memory services..."
   local mem_waited=0
+  if [[ ! -f "$PROJECT_ROOT/packages/memory-core/src/agentx_memory/api/server.py" ]]; then
+    log "Memory API source not installed (packages/memory-core empty) — skipping"
+    mem_waited=45
+  fi
   while [[ $mem_waited -lt 45 ]]; do
     if check_memory_api; then
       log "Memory API healthy after ${mem_waited}s"
@@ -494,8 +594,10 @@ main() {
     fi
   done
   if ! check_memory_api; then
-    log "Memory API not available after ${mem_waited}s (degraded — watchdog will retry)"
-    DEGRADED_SERVICES+=("memory-api")
+    if [[ -f "$PROJECT_ROOT/packages/memory-core/src/agentx_memory/api/server.py" ]]; then
+      log "Memory API not available after ${mem_waited}s (degraded — watchdog will retry)"
+      DEGRADED_SERVICES+=("memory-api")
+    fi
   fi
 
   # ─── Phase 6: Validate critical routes ─────────────────────────────────
@@ -511,6 +613,12 @@ main() {
       exit 1
     fi
   fi
+
+  # ─── Phase 6.5: Start the watchdog supervisor ──────────────────────────
+  # Keeps everything above alive BETWEEN launches: web server, memory
+  # API, qwen3-TTS, oMLX, Ollama. Started last so it never races the
+  # initial bring-up.
+  ensure_watchdog
 
   # ─── Phase 7: Open dashboard ───────────────────────────────────────────
   status_msg "Opening AgentX dashboard..."

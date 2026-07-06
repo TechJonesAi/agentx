@@ -121,8 +121,12 @@ while true; do
   fi
 
   # ── Check Memory API (port 8100) ──
+  # Only supervised when its Python source exists — packages/memory-core is
+  # an empty shell on main (source lost pre-restore), so without this guard
+  # the watchdog would log a false "down" warning every 30s forever.
   MEMORY_PORT="${AGENTX_MEMORY_API_PORT:-8100}"
-  if ! check_http "http://127.0.0.1:${MEMORY_PORT}/health"; then
+  MEMORY_SRC="$PROJECT_ROOT/packages/memory-core/src/agentx_memory/api/server.py"
+  if [[ -f "$MEMORY_SRC" ]] && ! check_http "http://127.0.0.1:${MEMORY_PORT}/health"; then
     wd_log "Memory API (port $MEMORY_PORT) not responding — checking if server should restart it"
     # Memory API is managed by ServiceSupervisor inside the web server.
     # If web server is healthy but memory API is not, nudge it via the
@@ -150,6 +154,23 @@ while true; do
       if check_http "http://127.0.0.1:${TTS_PORT}/health"; then
         wd_log "TTS server recovered"
       fi
+    fi
+  fi
+
+  # ── Check Ollama (primary inference engine) ──
+  # A dead Ollama means NO model inference at all — highest-priority heal.
+  if ! check_http "http://127.0.0.1:11434/api/tags"; then
+    wd_log "Ollama down — restarting..."
+    OLLAMA_BIN="$(command -v ollama || echo /opt/homebrew/bin/ollama)"
+    if [[ -x "$OLLAMA_BIN" ]]; then
+      nohup "$OLLAMA_BIN" serve >> "$LOG_DIR/ollama.log" 2>&1 &
+      wd_log "Ollama restarted (PID $!)"
+      sleep 5
+      if check_http "http://127.0.0.1:11434/api/tags"; then
+        wd_log "Ollama recovered"
+      fi
+    else
+      wd_log "Ollama binary not found — cannot heal (genuinely down)"
     fi
   fi
 
