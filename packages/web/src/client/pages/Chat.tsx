@@ -89,6 +89,70 @@ export function Chat(): React.JSX.Element {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  // ── Voice output (P13 fix) ────────────────────────────────────────
+  // The Voice On toggle previously changed only the button style — no
+  // audio was ever produced. Now: when voiceOn is active, each
+  // completed assistant reply is sent to POST /api/tts and the
+  // returned audio is played. A ref mirrors voiceOn so the streaming
+  // closures (which capture state at send time) always see the
+  // CURRENT toggle value; an audio ref lets a new reply cut off the
+  // previous one instead of overlapping.
+  const voiceOnRef = useRef(voiceOn);
+  useEffect(() => { voiceOnRef.current = voiceOn; }, [voiceOn]);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+
+  const speakText = useCallback(async (raw: string) => {
+    if (!voiceOnRef.current) return;
+    // Strip markdown decoration so the voice doesn't read symbols, and
+    // cap at ~1200 chars on a sentence boundary — long legal answers
+    // shouldn't monologue for minutes.
+    let text = raw
+      .replace(/```[\s\S]*?```/g, ' code block omitted. ')
+      .replace(/[*_#>`|]+/g, ' ')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text.length === 0) return;
+    if (text.length > 1200) {
+      const window = text.slice(0, 1200);
+      const lastStop = Math.max(window.lastIndexOf('.'), window.lastIndexOf('!'), window.lastIndexOf('?'));
+      text = lastStop > 400 ? window.slice(0, lastStop + 1) : window;
+    }
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) return; // voice is best-effort — never surface errors into chat
+      const blob = await res.blob();
+      // Stop + release the previous utterance before starting the new one.
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+      const url = URL.createObjectURL(blob);
+      audioUrlRef.current = url;
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      void audio.play().catch(() => { /* autoplay may require a gesture — toggle click counts */ });
+    } catch { /* best-effort */ }
+  }, []);
+
+  // Stop any playing audio when voice is toggled OFF or on unmount.
+  useEffect(() => {
+    if (!voiceOn && audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    return () => { if (audioRef.current) audioRef.current.pause(); };
+  }, [voiceOn]);
+
   // auto-scroll on new content
   useEffect(() => {
     const el = scrollRef.current;
@@ -223,6 +287,7 @@ export function Chat(): React.JSX.Element {
                 sessionId: evt.sessionId,
                 attachments: liveAtts,
               });
+              void speakText(finalContent); // P13 — voice output
             } else if (evt.type === 'error') {
               setBannerError({ code: evt.code, message: evt.message });
               updateAssistant(asstId, {
@@ -309,6 +374,7 @@ export function Chat(): React.JSX.Element {
               streaming: false,
               sessionId: evt.sessionId,
             });
+            void speakText(finalContent); // P13 — voice output
           } else if (evt.type === 'error') {
             setBannerError({ code: evt.code, message: evt.message });
             updateAssistant(asstId, {
@@ -332,7 +398,7 @@ export function Chat(): React.JSX.Element {
     } finally {
       setSending(false);
     }
-  }, [input, sending, attachments, sessionId, persona, updateAssistant]);
+  }, [input, sending, attachments, sessionId, persona, updateAssistant, speakText]);
 
   const onFileChosen = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const files = e.target.files ? Array.from(e.target.files) : [];
