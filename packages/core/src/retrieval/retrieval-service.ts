@@ -54,7 +54,22 @@ export class RetrievalService {
 
     try {
       const sourceInfo: { source: RetrievalSource } = { source: 'fts' };
-      const results = await this.executeRetrieval(intent, query, options.topK || 10, sourceInfo);
+      let results = await this.executeRetrieval(intent, query, options.topK || 10, sourceInfo);
+      // P13-A1 — Zero-result semantic fallback. Corpus-phrase queries
+      // ("according to my documents, …") can misroute to FILTERED_SEARCH
+      // whose parsed filters match nothing; giving up there hides real
+      // content that SEMANTIC retrieval finds. When a non-semantic,
+      // non-COUNT intent yields ZERO results, retry once as SEMANTIC —
+      // strictly additive: only fires on an otherwise-empty answer.
+      if (results.length === 0 && intent !== 'SEMANTIC' && intent !== 'COUNT') {
+        const fallbackInfo: { source: RetrievalSource } = { source: 'vector' };
+        const fallback = await this.executeRetrieval('SEMANTIC', query, options.topK || 10, fallbackInfo);
+        if (fallback.length > 0) {
+          log.info({ query: query.slice(0, 60), originalIntent: intent, fallbackResults: fallback.length }, 'P13-A1: zero-result fallback to SEMANTIC rescued the query');
+          results = fallback;
+          sourceInfo.source = fallbackInfo.source;
+        }
+      }
       const executionMs = Date.now() - startTime;
 
       this.logger.logRetrieval({

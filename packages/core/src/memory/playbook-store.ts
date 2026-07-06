@@ -31,6 +31,7 @@
 
 import type BetterSqlite3 from 'better-sqlite3';
 import { createLogger } from '../logger.js';
+import { cosineSim, vecToBuffer, bufferToVec, type EmbedFn } from '../llm/ollama-embedder.js';
 
 const log = createLogger('memory:playbooks');
 
@@ -110,8 +111,16 @@ function computeConfidence(successes: number, uses: number): number {
 }
 
 export class PlaybookStore {
+  /** P13-B1 — optional embedder for semantic matching. When unset (or
+   *  when embedding fails), everything falls back to keyword Jaccard. */
+  private embedder: EmbedFn | null = null;
+
   constructor(private db: BetterSqlite3.Database) {
     this.ensureSchema();
+  }
+
+  setEmbedder(fn: EmbedFn): void {
+    this.embedder = fn;
   }
 
   private ensureSchema(): void {
@@ -135,6 +144,10 @@ export class PlaybookStore {
       CREATE INDEX IF NOT EXISTS idx_playbooks_task ON playbooks(task_type);
       CREATE INDEX IF NOT EXISTS idx_playbooks_conf ON playbooks(confidence);
     `);
+    // P13-B1 — additive migration: embedding column for semantic match.
+    try {
+      this.db.exec('ALTER TABLE playbooks ADD COLUMN embedding BLOB');
+    } catch { /* column already exists */ }
   }
 
   /* ── Learning: record what happened ─────────────────────────────── */
@@ -188,6 +201,19 @@ export class PlaybookStore {
             input.success ? 0 : 1,
             computeConfidence(input.success ? 1 : 0, 1),
           );
+      }
+      // P13-B1 — fire-and-forget: embed the sample query so future
+      // recall can match semantically. Never blocks the turn.
+      if (this.embedder) {
+        void this.embedder([input.query.slice(0, 500)]).then((vecs) => {
+          if (vecs && vecs[0]) {
+            try {
+              this.db
+                .prepare('UPDATE playbooks SET embedding = ? WHERE task_type = ? AND signature = ?')
+                .run(vecToBuffer(vecs[0]), input.taskType, signature);
+            } catch { /* best-effort */ }
+          }
+        }).catch(() => { /* embed unavailable */ });
       }
     } catch (err) {
       log.warn(
@@ -285,6 +311,51 @@ export class PlaybookStore {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * P13-B1 — Semantic recall. Embeds the query and cosine-matches it
+   * against stored playbook embeddings of the same task type. Threshold
+   * 0.75 keeps precision high ("dismissal exposure" ↔ "argument against
+   * dismissal" matches; unrelated topics don't). Falls back to the
+   * keyword matcher when the embedder is unset, fails, or nothing
+   * clears the threshold — semantic is a strict superset of keyword
+   * recall, never a replacement.
+   */
+  async findBestSemantic(taskType: string, query: string): Promise<PlaybookMatch | null> {
+    if (this.embedder) {
+      try {
+        const vecs = await this.embedder([query.slice(0, 500)]);
+        const qv = vecs?.[0];
+        if (qv && qv.length > 0) {
+          const candidates = this.db
+            .prepare(`
+              SELECT * FROM playbooks
+              WHERE task_type = ? AND use_count >= 2 AND embedding IS NOT NULL
+              ORDER BY confidence DESC LIMIT 60
+            `)
+            .all(taskType) as Array<PlaybookRow & { embedding: Buffer | null }>;
+          let best: PlaybookMatch | null = null;
+          let bestScore = 0;
+          for (const p of candidates) {
+            if (!p.embedding) continue;
+            const sim = cosineSim(qv, bufferToVec(p.embedding));
+            if (sim < 0.75) continue;
+            const score = sim * p.confidence;
+            if (score > bestScore) {
+              bestScore = score;
+              best = {
+                playbook: p,
+                overlap: Math.round(sim * 100) / 100,
+                modelBiasEligible: p.confidence >= 0.8 && p.success_count >= 3 && !!p.model,
+              };
+            }
+          }
+          if (best) return best;
+        }
+      } catch { /* fall through to keyword */ }
+    }
+    return this.findBest(taskType, query);
   }
 
   /** Render the "proven approach" prompt block (≤ 300 chars). */

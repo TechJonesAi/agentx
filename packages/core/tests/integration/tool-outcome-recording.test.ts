@@ -73,7 +73,9 @@ describe('Tool outcome recording through ToolRegistry', () => {
     store.record('memory_search', searchRes, Date.now() - t1);
 
     expect(storeRes).toContain('[memory_store ok]');
-    expect(searchRes).toContain('match');
+    // P13-A2 — memory_search is now the unified memory tool; results
+    // render under a "Long-term notes (N)" section header.
+    expect(searchRes).toContain('Long-term notes');
     expect(searchRes).toContain(sentinel);
 
     expect(store.size()).toBe(2);

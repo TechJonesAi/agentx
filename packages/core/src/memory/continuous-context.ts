@@ -30,6 +30,7 @@
 import type BetterSqlite3 from 'better-sqlite3';
 import { createLogger } from '../logger.js';
 import type { Message } from '../types.js';
+import { cosineSim, vecToBuffer, bufferToVec, type EmbedFn } from '../llm/ollama-embedder.js';
 
 const log = createLogger('memory:continuous-context');
 
@@ -63,8 +64,16 @@ export interface BridgeContext {
 }
 
 export class ContinuousContextStore {
+  /** P13-B1 — optional embedder; archive rows get embeddings so past
+   *  conversations are semantically searchable. Fail-open to FTS/LIKE. */
+  private embedder: EmbedFn | null = null;
+
   constructor(private db: BetterSqlite3.Database) {
     this.ensureSchema();
+  }
+
+  setEmbedder(fn: EmbedFn): void {
+    this.embedder = fn;
   }
 
   private ensureSchema(): void {
@@ -94,6 +103,10 @@ export class ContinuousContextStore {
       CREATE INDEX IF NOT EXISTS idx_decision_journal_kind ON decision_journal(kind);
       CREATE INDEX IF NOT EXISTS idx_decision_journal_session ON decision_journal(session_id);
     `);
+    // P13-B1 — additive migration: embedding column on archive rows.
+    try {
+      this.db.exec('ALTER TABLE conversation_archive ADD COLUMN embedding BLOB');
+    } catch { /* column already exists */ }
     // FTS is best-effort — SQLite builds without FTS5 degrade to LIKE.
     try {
       this.db.exec(`
@@ -165,6 +178,24 @@ export class ContinuousContextStore {
       });
       tx();
       log.info({ sessionId, batchId, archived }, 'P12-2: compacted turns archived (retrievable)');
+      // P13-B1 — fire-and-forget: embed the new archive rows so past
+      // conversations are semantically searchable. Never blocks.
+      if (this.embedder && archived > 0) {
+        void (async () => {
+          try {
+            const rows = this.db
+              .prepare('SELECT id, content FROM conversation_archive WHERE batch_id = ? AND embedding IS NULL')
+              .all(batchId) as Array<{ id: number; content: string }>;
+            if (rows.length === 0) return;
+            const vecs = await this.embedder!(rows.map((r) => r.content.slice(0, 500)));
+            if (!vecs) return;
+            const upd = this.db.prepare('UPDATE conversation_archive SET embedding = ? WHERE id = ?');
+            for (let i = 0; i < rows.length; i++) {
+              if (vecs[i]) upd.run(vecToBuffer(vecs[i]!), rows[i]!.id);
+            }
+          } catch { /* best-effort */ }
+        })();
+      }
       return { archived };
     } catch (err) {
       log.warn(
@@ -214,6 +245,42 @@ export class ContinuousContextStore {
         .all(like, limit) as ArchivedTurn[];
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * P13-B1 — Semantic archive search. Embeds the query and cosine-ranks
+   * archive rows; merges with keyword hits (semantic first, deduped).
+   * Falls back to plain searchArchive when the embedder is unavailable.
+   * Used by the memory_search tool; the hot prompt path keeps the
+   * cheaper keyword search.
+   */
+  async searchArchiveSemantic(query: string, limit = 5): Promise<ArchivedTurn[]> {
+    const keyword = this.searchArchive(query, limit);
+    if (!this.embedder) return keyword;
+    try {
+      const vecs = await this.embedder([query.slice(0, 500)]);
+      const qv = vecs?.[0];
+      if (!qv || qv.length === 0) return keyword;
+      const rows = this.db
+        .prepare('SELECT * FROM conversation_archive WHERE embedding IS NOT NULL ORDER BY id DESC LIMIT 500')
+        .all() as Array<ArchivedTurn & { embedding: Buffer | null }>;
+      const scored = rows
+        .map((r) => ({ r, sim: r.embedding ? cosineSim(qv, bufferToVec(r.embedding)) : 0 }))
+        .filter((x) => x.sim >= 0.6)
+        .sort((a, b) => b.sim - a.sim)
+        .slice(0, limit)
+        .map((x) => x.r);
+      // Merge: semantic first, keyword fills the remainder (dedup by id).
+      const seen = new Set(scored.map((r) => r.id));
+      const merged: ArchivedTurn[] = [...scored];
+      for (const k of keyword) {
+        if (merged.length >= limit) break;
+        if (!seen.has(k.id)) { merged.push(k); seen.add(k.id); }
+      }
+      return merged;
+    } catch {
+      return keyword;
     }
   }
 

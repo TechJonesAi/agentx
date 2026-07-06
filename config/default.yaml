@@ -8,14 +8,18 @@ agent:
   # stays on the 70b for accuracy.
   defaultProvider: ollama
   model: llama3.3:70b-instruct-q4_K_M
+  # P13-A1 — Activation: the cognitive layer was built and tested but
+  # shipped disabled. Retrieval grounds document answers in the user's
+  # 261-doc corpus; entity indexing powers "who is X" lookups;
+  # intelligence stays observation-only (no influence on routing).
   intelligence:
-    enabled: false
+    enabled: true
     observationOnly: true
     influenceMode: off
   retrieval:
-    enabled: false
+    enabled: true
   entityIndexing:
-    enabled: false
+    enabled: true
 
 providers:
   anthropic:

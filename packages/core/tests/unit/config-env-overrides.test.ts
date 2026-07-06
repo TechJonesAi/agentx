@@ -217,14 +217,16 @@ describe('loadConfig + env overrides — end-to-end', () => {
   });
 });
 
-describe('repository default.yaml is OFF for both flags', () => {
-  it('repo config/default.yaml ships with both flags disabled', () => {
-    // Read the repo default.yaml directly and verify the defaults haven't drifted.
+describe('repository default.yaml ships the cognitive layer ON (P13-A1)', () => {
+  it('repo config/default.yaml enables retrieval + entityIndexing', () => {
+    // P13-A1 Activation: the cognitive layer (retrieval + entity
+    // indexing) is the product — it ships ENABLED. This test pins the
+    // new default so it can't silently regress to OFF.
     const repoYaml = fs.readFileSync(
       path.join(__dirname, '..', '..', '..', '..', 'config', 'default.yaml'),
       'utf-8',
     );
-    expect(repoYaml).toMatch(/retrieval:\s*\n\s*enabled:\s*false/);
-    expect(repoYaml).toMatch(/entityIndexing:\s*\n\s*enabled:\s*false/);
+    expect(repoYaml).toMatch(/retrieval:\s*\n\s*enabled:\s*true/);
+    expect(repoYaml).toMatch(/entityIndexing:\s*\n\s*enabled:\s*true/);
   });
 });

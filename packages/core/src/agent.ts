@@ -41,6 +41,7 @@ import { RetrievalService } from './retrieval/retrieval-service.js';
 import { ContinuousContextStore } from './memory/continuous-context.js';
 import { PlaybookStore } from './memory/playbook-store.js';
 import { ToolForge, buildForgeDraftTool, buildForgeListTool } from './tools/tool-forge.js';
+import { buildOllamaEmbedder } from './llm/ollama-embedder.js';
 import { extractSnippet } from './retrieval/snippet-extractor.js';
 import {
   assessRetrievalSufficiency,
@@ -528,6 +529,25 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       log.warn(
         { err: pbErr instanceof Error ? pbErr.message : String(pbErr) },
         'P12-3: PlaybookStore init failed — success memory disabled',
+      );
+    }
+
+    // ── P13-B1: Semantic memory — embedder for playbooks + archive ───
+    // nomic-embed-text via the local Ollama endpoint. Fail-open: when
+    // Ollama or the model is unavailable, both stores silently fall
+    // back to keyword matching.
+    try {
+      const ollamaBase =
+        (this.config.providers as Record<string, { baseUrl?: string } | undefined>)['ollama']?.baseUrl ??
+        'http://localhost:11434';
+      const embedder = buildOllamaEmbedder({ baseUrl: ollamaBase });
+      this._playbooks?.setEmbedder(embedder);
+      this._continuousContext?.setEmbedder(embedder);
+      log.info({ ollamaBase }, 'P13-B1: semantic embedder wired into playbooks + archive');
+    } catch (embErr) {
+      log.warn(
+        { err: embErr instanceof Error ? embErr.message : String(embErr) },
+        'P13-B1: embedder wiring failed — keyword matching only',
       );
     }
 
@@ -1345,6 +1365,13 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   /** P12-2 — accessor for the durability layer (API / dashboard). */
   getContinuousContext(): ContinuousContextStore | null { return this._continuousContext; }
 
+  /** P13-A2 — accessor so the memory_search tool can reach document retrieval. */
+  getRetrievalService(): RetrievalService | null { return this._retrievalService; }
+
+  /** P13-A2 — read-only db handle for tool-side metadata lookups
+   *  (document titles / chunk excerpts in memory_search results). */
+  getDb(): Database.Database { return this.db; }
+
   /** P12-3 — accessor for the success-memory layer (API / dashboard). */
   getPlaybooks(): PlaybookStore | null { return this._playbooks; }
 
@@ -1373,6 +1400,44 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
         responseChars: responseContent.length,
         sessionId,
       });
+
+      // ── P13-C2: Proactive workflow proposals ──────────────────────
+      // When a playbook proves itself repeatedly (confidence ≥ 0.9 AND
+      // ≥ 5 uses) on a recurring-friendly task type, record ONE
+      // workflow_proposal in the decision journal so the human can see
+      // "AgentX has done this successfully 5+ times — want it scheduled?"
+      // Strictly a PROPOSAL: nothing runs autonomously without approval.
+      if (this._continuousContext) {
+        const RECURRING_TYPES = new Set(['summarisation', 'retrieval-grounded-qa', 'deadline_extraction']);
+        if (RECURRING_TYPES.has(classification.primary)) {
+          const match = this._playbooks.findBest(classification.primary, input);
+          const p = match?.playbook;
+          if (p && p.confidence >= 0.9 && p.use_count >= 5) {
+            const alreadyProposed = this._continuousContext
+              .listDecisions({ kind: 'workflow_proposal', limit: 100 })
+              .some((d) => d.title.includes(p.signature));
+            if (!alreadyProposed) {
+              this._continuousContext.recordDecision(
+                'workflow_proposal',
+                `Recurring success detected [${p.signature}] — propose scheduling as an autonomous workflow`,
+                {
+                  taskType: p.task_type,
+                  signature: p.signature,
+                  sampleQuery: p.sample_query,
+                  confidence: p.confidence,
+                  uses: p.use_count,
+                  model: p.model,
+                },
+                sessionId,
+              );
+              log.info(
+                { taskType: p.task_type, signature: p.signature, confidence: p.confidence, uses: p.use_count },
+                'P13-C2: workflow proposal recorded — awaiting human review (GET /api/continuity/journal?kind=workflow_proposal)',
+              );
+            }
+          }
+        }
+      }
     } catch { /* learning must never break a turn */ }
   }
 
@@ -1771,7 +1836,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
           //      routing guards (disabled / not-installed / degraded).
           let playbookPreferred: string[] = [];
           try {
-            const match = this._playbooks?.findBest(classification.primary, userText) ?? null;
+            // P13-B1 — semantic-first recall with keyword fallback.
+            const match = this._playbooks
+              ? await this._playbooks.findBestSemantic(classification.primary, userText)
+              : null;
             if (match) {
               const hint = this._playbooks!.renderHintBlock(match);
               options = { ...options, systemPrompt: (options.systemPrompt ?? '') + hint };
@@ -1813,6 +1881,83 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
             localOnly: active.localOnly,
             toolCallingEnabled: (options.tools?.length ?? 0) > 0,
           });
+
+          // ── P13-B2: Draft-fast / verify-heavy pipeline ──────────────
+          // For grounded document QA on the heavy lane: let the fast MoE
+          // draft the answer (~4-6× faster), then have the HEAVY model
+          // act as a strict verifier (short output — cheap). VALID →
+          // ship the fast draft; INVALID / tool-calls / any error →
+          // fall through to the normal heavy completion unchanged.
+          // Accuracy is preserved because the 70b remains the judge of
+          // every shipped fast answer. Opt-out: AGENTX_FAST_DRAFT_VERIFY=false.
+          if (
+            process.env['AGENTX_FAST_DRAFT_VERIFY'] !== 'false' &&
+            decision.taskType === 'retrieval-grounded-qa' &&
+            decision.model === active.model && // heavy lane only
+            (options.systemPrompt ?? '').includes('--- Retrieved Knowledge')
+          ) {
+            const fastModel = DEFAULT_TASK_MODEL_MAP['chat'];
+            if (fastModel && (this._installedLocalModelCache ?? []).includes(fastModel)) {
+              try {
+                const t0 = Date.now();
+                const draft = await this.provider.complete({
+                  messages: options.messages,
+                  systemPrompt: options.systemPrompt,
+                  model: fastModel,
+                  // No tools for the draft — tool loops belong to the
+                  // heavy path.
+                });
+                const draftMs = Date.now() - t0;
+                const draftText = draft?.content?.trim() ?? '';
+                const hasToolCalls = Array.isArray((draft as { toolCalls?: unknown[] }).toolCalls) && ((draft as { toolCalls?: unknown[] }).toolCalls!.length > 0);
+                if (draftText.length > 40 && !hasToolCalls) {
+                  const verifyPrompt =
+                    'You are a strict citation verifier. Below is a QUESTION, retrieved SOURCE EXCERPTS, and a DRAFT ANSWER. ' +
+                    'Reply with exactly one word: VALID if every factual claim in the draft is supported by the excerpts, ' +
+                    'or INVALID if any claim is unsupported, contradicted, or fabricated.';
+                  const excerpts = (options.systemPrompt ?? '').split('--- Retrieved Knowledge')[1]?.slice(0, 6000) ?? '';
+                  const t1 = Date.now();
+                  const verdict = await this.provider.complete({
+                    messages: [{
+                      role: 'user',
+                      content: `QUESTION:\n${userText.slice(0, 1000)}\n\nSOURCE EXCERPTS:\n${excerpts}\n\nDRAFT ANSWER:\n${draftText.slice(0, 4000)}\n\nReply VALID or INVALID only.`,
+                      timestamp: Date.now(),
+                    }],
+                    systemPrompt: verifyPrompt,
+                    model: active.model, // the heavy model judges
+                    maxTokens: 8,
+                    temperature: 0,
+                  });
+                  const verifyMs = Date.now() - t1;
+                  const verdictText = (verdict?.content ?? '').trim().toUpperCase();
+                  if (verdictText.startsWith('VALID')) {
+                    log.info(
+                      { draftMs, verifyMs, fastModel, totalMs: draftMs + verifyMs },
+                      'P13-B2: fast draft VERIFIED by heavy model — shipping fast answer',
+                    );
+                    this._continuousContext?.recordDecision(
+                      'fast_draft_verified',
+                      `Grounded answer drafted by ${fastModel} and verified by ${active.model} (${draftMs + verifyMs}ms total)`,
+                      { draftMs, verifyMs },
+                    );
+                    if (draft.usage) {
+                      this.rateLimiter.recordTokenUsage(draft.usage.inputTokens + draft.usage.outputTokens);
+                    }
+                    return draft;
+                  }
+                  log.info(
+                    { draftMs, verifyMs, verdict: verdictText.slice(0, 20) },
+                    'P13-B2: draft rejected by verifier — regenerating on heavy model',
+                  );
+                }
+              } catch (dvErr) {
+                log.warn(
+                  { err: dvErr instanceof Error ? dvErr.message : String(dvErr) },
+                  'P13-B2: draft-verify attempt failed — falling through to heavy path',
+                );
+              }
+            }
+          }
         }
       } catch (routeErr) {
         // Routing must NEVER break a completion — fall through to the

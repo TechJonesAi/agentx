@@ -9,6 +9,7 @@ import type { Agent } from '@agentx/core';
 import { createLogger } from '@agentx/core';
 import { tryUnsupportedSpaShim, unknownEndpointEnvelope } from './spa-shims.js';
 import { createTtsRouter, type TtsRouter } from '../tts/index.js';
+import { BillboardCampaignService } from '../billboard-campaign.js';
 import {
   listMemoryItems,
   getMemoryDetail,
@@ -171,6 +172,11 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
     if (!ttsRouter) ttsRouter = createTtsRouter();
     return ttsRouter;
   };
+  let billboardCampaign: BillboardCampaignService | null = null;
+  const getBillboardCampaign = (): BillboardCampaignService => {
+    billboardCampaign ??= new BillboardCampaignService();
+    return billboardCampaign;
+  };
 
   return {
     async handle(method: string, url: string, req: http.IncomingMessage, res: http.ServerResponse) {
@@ -186,6 +192,85 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
       }
 
       try {
+        // Rankinfy billboard outreach. Draft generation never approves or sends.
+        if (route === '/api/billboard/summary' && method === 'GET') {
+          sendJson(res, 200, getBillboardCampaign().getSummary());
+          return;
+        }
+        if (route === '/api/billboard/agencies' && method === 'GET') {
+          sendJson(res, 200, { agencies: getBillboardCampaign().listAgencies() });
+          return;
+        }
+        if (route === '/api/billboard/agencies/import' && method === 'POST') {
+          sendJson(res, 200, getBillboardCampaign().importSeeds());
+          return;
+        }
+        if (route === '/api/billboard/agencies/enrich' && method === 'POST') {
+          sendJson(res, 200, await getBillboardCampaign().enrichAll());
+          return;
+        }
+        const billboardAgencyMatch = route.match(/^\/api\/billboard\/agencies\/(\d+)$/);
+        if (billboardAgencyMatch && method === 'PATCH') {
+          const body = await parseBody(req);
+          sendJson(res, 200, getBillboardCampaign().setAgencyContact(Number(billboardAgencyMatch[1]), {
+            email: typeof body.email === 'string' ? body.email : null,
+            contactPageUrl: typeof body.contactPageUrl === 'string' ? body.contactPageUrl : null,
+            note: typeof body.note === 'string' ? body.note : undefined,
+          }));
+          return;
+        }
+        const billboardEnrichMatch = route.match(/^\/api\/billboard\/agencies\/(\d+)\/enrich$/);
+        if (billboardEnrichMatch && method === 'POST') {
+          sendJson(res, 200, await getBillboardCampaign().enrichAgency(Number(billboardEnrichMatch[1])));
+          return;
+        }
+        if (route === '/api/billboard/drafts' && method === 'GET') {
+          sendJson(res, 200, { drafts: getBillboardCampaign().listDrafts() });
+          return;
+        }
+        if (route === '/api/billboard/drafts/generate' && method === 'POST') {
+          sendJson(res, 200, getBillboardCampaign().generateDrafts());
+          return;
+        }
+        const billboardDraftMatch = route.match(/^\/api\/billboard\/drafts\/(\d+)$/);
+        if (billboardDraftMatch && method === 'PATCH') {
+          const body = await parseBody(req);
+          sendJson(res, 200, getBillboardCampaign().updateDraft(Number(billboardDraftMatch[1]), {
+            subject: typeof body.subject === 'string' ? body.subject : undefined,
+            body: typeof body.body === 'string' ? body.body : undefined,
+            recipientEmail: typeof body.recipientEmail === 'string' ? body.recipientEmail : undefined,
+          }));
+          return;
+        }
+        const billboardApproveMatch = route.match(/^\/api\/billboard\/drafts\/(\d+)\/approve$/);
+        if (billboardApproveMatch && method === 'POST') {
+          sendJson(res, 200, getBillboardCampaign().approveDraft(Number(billboardApproveMatch[1])));
+          return;
+        }
+        if (route === '/api/billboard/suppressions' && method === 'POST') {
+          const body = await parseBody(req);
+          if (typeof body.email !== 'string') { sendJson(res, 400, { error: 'email is required' }); return; }
+          getBillboardCampaign().suppress(body.email, typeof body.reason === 'string' ? body.reason : undefined);
+          sendJson(res, 200, { suppressed: true });
+          return;
+        }
+        if (route === '/api/billboard/campaign/start' && method === 'POST') {
+          sendJson(res, 200, getBillboardCampaign().start());
+          return;
+        }
+        if (route === '/api/billboard/campaign/pause' && method === 'POST') {
+          sendJson(res, 200, getBillboardCampaign().pause());
+          return;
+        }
+        if (route === '/api/billboard/campaign/resume' && method === 'POST') {
+          sendJson(res, 200, getBillboardCampaign().resume());
+          return;
+        }
+        if (route === '/api/billboard/campaign/stop' && method === 'POST') {
+          sendJson(res, 200, getBillboardCampaign().stop());
+          return;
+        }
+
         // ─── Health ──────────────────────────────────────────────────────
         if (route === '/api/health' && method === 'GET') {
           sendJson(res, 200, { ok: true, timestamp: new Date().toISOString() });
@@ -1589,6 +1674,89 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             });
           } catch (e) {
             sendJson(res, 200, { available: false, history: [], current: null, error: String(e) });
+          }
+          return;
+        }
+
+        // ── P13-C1: Intelligence-layer APIs (forge / playbooks / continuity) ──
+        // Read surfaces for the P12 stores plus the ONE mutating action a
+        // human needs: approving a forged tool. All fail-open to
+        // available:false so the dashboard renders gracefully when a
+        // store is disabled.
+        if (route === '/api/forge/tools' && method === 'GET') {
+          try {
+            const forge = (agent as unknown as { getToolForge?: () => { listTools(s?: string): unknown[]; getStats(): unknown } | null }).getToolForge?.();
+            const u = new URL(url, 'http://x');
+            const status = u.searchParams.get('status') ?? undefined;
+            sendJson(res, 200, {
+              available: !!forge,
+              tools: forge?.listTools(status && ['pending', 'approved', 'disabled'].includes(status) ? status : undefined) ?? [],
+              stats: forge?.getStats() ?? null,
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, tools: [], stats: null, error: String(e) });
+          }
+          return;
+        }
+
+        if (route === '/api/forge/approve' && method === 'POST') {
+          try {
+            const body = await parseBody(req);
+            const name = String((body as { name?: unknown }).name ?? '').trim();
+            if (!name) { sendJson(res, 400, { ok: false, error: 'name required' }); return; }
+            const forge = (agent as unknown as { getToolForge?: () => { approveTool(n: string): { ok: boolean; error?: string } } | null }).getToolForge?.();
+            if (!forge) { sendJson(res, 503, { ok: false, error: 'forge unavailable' }); return; }
+            sendJson(res, 200, forge.approveTool(name));
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: String(e) });
+          }
+          return;
+        }
+
+        if (route === '/api/forge/disable' && method === 'POST') {
+          try {
+            const parsed = await parseBody(req) as { name?: unknown; reason?: unknown };
+            const name = String(parsed.name ?? '').trim();
+            if (!name) { sendJson(res, 400, { ok: false, error: 'name required' }); return; }
+            const forge = (agent as unknown as { getToolForge?: () => { disableTool(n: string, r: string): { ok: boolean; error?: string } } | null }).getToolForge?.();
+            if (!forge) { sendJson(res, 503, { ok: false, error: 'forge unavailable' }); return; }
+            sendJson(res, 200, forge.disableTool(name, String(parsed.reason ?? 'disabled via API')));
+          } catch (e) {
+            sendJson(res, 500, { ok: false, error: String(e) });
+          }
+          return;
+        }
+
+        if (route === '/api/playbooks' && method === 'GET') {
+          try {
+            const pb = (agent as unknown as { getPlaybooks?: () => { list(o?: { taskType?: string; limit?: number }): unknown[]; getStats(): unknown } | null }).getPlaybooks?.();
+            const u = new URL(url, 'http://x');
+            const taskType = u.searchParams.get('taskType') ?? undefined;
+            const limit = Math.max(1, Math.min(200, Number(u.searchParams.get('limit') ?? '50')));
+            sendJson(res, 200, {
+              available: !!pb,
+              playbooks: pb?.list({ ...(taskType ? { taskType } : {}), limit }) ?? [],
+              stats: pb?.getStats() ?? null,
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, playbooks: [], stats: null, error: String(e) });
+          }
+          return;
+        }
+
+        if (route === '/api/continuity/journal' && method === 'GET') {
+          try {
+            const cc = (agent as unknown as { getContinuousContext?: () => { listDecisions(o?: { kind?: string; limit?: number }): unknown[]; getStats(): unknown } | null }).getContinuousContext?.();
+            const u = new URL(url, 'http://x');
+            const kind = u.searchParams.get('kind') ?? undefined;
+            const limit = Math.max(1, Math.min(200, Number(u.searchParams.get('limit') ?? '50')));
+            sendJson(res, 200, {
+              available: !!cc,
+              journal: cc?.listDecisions({ ...(kind ? { kind } : {}), limit }) ?? [],
+              stats: cc?.getStats() ?? null,
+            });
+          } catch (e) {
+            sendJson(res, 200, { available: false, journal: [], stats: null, error: String(e) });
           }
           return;
         }

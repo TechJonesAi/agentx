@@ -175,7 +175,8 @@ export const memoryStoreTool: Tool = {
 export const memorySearchTool: Tool = {
   definition: {
     name: 'memory_search',
-    description: 'Search long-term memory by content substring and/or tags. Returns matching memories with their ids.',
+    description:
+      'Search ALL memory: long-term notes, the uploaded document corpus (semantic + keyword), and archived past conversations. Returns matching entries with their sources.',
     parameters: {
       type: 'object',
       properties: {
@@ -216,11 +217,72 @@ export const memorySearchTool: Tool = {
         }
         results = results.slice(0, limit);
       }
-      if (results.length === 0) {
-        return `[memory_search]: no matches for query='${query}' tags=[${tags.join(', ')}]`;
+      const sections: string[] = [];
+      if (results.length > 0) {
+        const lines = results.map((r, i) => `${i + 1}. [note ${r.id.slice(0, 8)}] (tags: ${r.tags.join(', ') || 'none'}) ${r.content.slice(0, 200)}`);
+        sections.push(`Long-term notes (${results.length}):\n${lines.join('\n')}`);
       }
-      const lines = results.map((r, i) => `${i + 1}. [${r.id.slice(0, 8)}] (tags: ${r.tags.join(', ') || 'none'}) ${r.content.slice(0, 200)}`);
-      return `[memory_search]: ${results.length} match(es)\n${lines.join('\n')}`;
+
+      // P13-A2 — Unified memory: also search the DOCUMENT CORPUS via the
+      // agent's RetrievalService (semantic + keyword) so the model can
+      // actively query uploaded documents mid-turn, not just notes.
+      try {
+        const agentAny = context.agent as unknown as {
+          getRetrievalService?: () => {
+            retrieve(q: string, o?: { topK?: number }): Promise<{
+              results: Array<{ document_id?: string | null; chunk_id?: string | null; score?: number }>;
+            }>;
+          } | null;
+          getDb?: () => unknown;
+        };
+        const rs = agentAny.getRetrievalService?.();
+        if (rs && query) {
+          const r = await rs.retrieve(query, { topK: Math.min(limit, 6) });
+          if (r.results.length > 0) {
+            const db = (context.agent as unknown as { getDb?: () => { prepare(sql: string): { get(...a: unknown[]): unknown } } }).getDb?.();
+            const lines: string[] = [];
+            for (const res of r.results.slice(0, 6)) {
+              if (!res.document_id) continue;
+              let title = res.document_id;
+              let snippet = '';
+              try {
+                if (db) {
+                  const doc = db.prepare('SELECT file_name, title FROM documents WHERE document_id = ?').get(res.document_id) as { file_name?: string; title?: string } | undefined;
+                  title = doc?.title || doc?.file_name || res.document_id;
+                  const ch = res.chunk_id
+                    ? db.prepare('SELECT content FROM document_chunks WHERE chunk_id = ? LIMIT 1').get(res.chunk_id) as { content?: string } | undefined
+                    : db.prepare('SELECT content FROM document_chunks WHERE document_id = ? LIMIT 1').get(res.document_id) as { content?: string } | undefined;
+                  snippet = (ch?.content ?? '').replace(/\s+/g, ' ').slice(0, 200);
+                }
+              } catch { /* metadata best-effort */ }
+              lines.push(`- [doc ${res.document_id}] ${title}${snippet ? `\n  excerpt: ${snippet}` : ''}`);
+            }
+            if (lines.length > 0) sections.push(`Documents (${lines.length}):\n${lines.join('\n')}`);
+          }
+        }
+      } catch { /* corpus search best-effort */ }
+
+      // P13-A2/B1 — Also search archived past conversations (semantic
+      // when embeddings are available, keyword otherwise).
+      try {
+        const cc = (context.agent as unknown as {
+          getContinuousContext?: () => {
+            searchArchiveSemantic(q: string, n?: number): Promise<Array<{ role: string; content: string; kind: string }>>;
+          } | null;
+        }).getContinuousContext?.();
+        if (cc && query) {
+          const hits = await cc.searchArchiveSemantic(query, 3);
+          if (hits.length > 0) {
+            const lines = hits.map((h) => `- [${h.kind === 'summary' ? 'past session summary' : 'past ' + h.role}] ${h.content.replace(/\s+/g, ' ').slice(0, 180)}`);
+            sections.push(`Past conversations (${hits.length}):\n${lines.join('\n')}`);
+          }
+        }
+      } catch { /* archive best-effort */ }
+
+      if (sections.length === 0) {
+        return `[memory_search]: no matches for query='${query}' tags=[${tags.join(', ')}] across notes, documents, or past conversations`;
+      }
+      return `[memory_search]:\n${sections.join('\n\n')}`;
     } catch (e) {
       return `[memory_search error]: ${e instanceof Error ? e.message : String(e)}`;
     }
