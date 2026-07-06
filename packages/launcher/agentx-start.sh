@@ -307,6 +307,72 @@ ensure_ollama() {
   return 0
 }
 
+# ─── oMLX (P13-A3) ─────────────────────────────────────────────────────────
+# Apple-Silicon MLX inference sidecar. OPTIONAL: when it runs, AgentX's
+# routing engine benchmarks it against Ollama and promotes it per task
+# (measured 4-6× faster on the M4 Max). When it's absent, everything
+# runs on Ollama — never a failure condition.
+
+OMLX_PORT="${AGENTX_OMLX_PORT:-8080}"
+OMLX_MODEL="${AGENTX_OMLX_MODEL:-mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit}"
+OMLX_BIN="$HOME/.agentx/mlx-venv/bin/mlx_lm.server"
+
+check_omlx() {
+  check_http "http://127.0.0.1:${OMLX_PORT}/v1/models" 3
+}
+
+ensure_omlx() {
+  if check_omlx; then
+    log "oMLX already running on :${OMLX_PORT}"
+    STARTED_SERVICES+=("omlx")
+    return 0
+  fi
+
+  if [[ ! -x "$OMLX_BIN" ]]; then
+    log "oMLX not installed (optional — Ollama-only mode). Install: python3.13 -m venv ~/.agentx/mlx-venv && ~/.agentx/mlx-venv/bin/pip install mlx-lm 'transformers==5.12.0'"
+    DEGRADED_SERVICES+=("omlx")
+    return 0
+  fi
+
+  # Port occupied by something unhealthy → clean it first.
+  if is_port_in_use "$OMLX_PORT"; then
+    log "Port $OMLX_PORT occupied but unhealthy — cleaning stale oMLX"
+    kill_port "$OMLX_PORT"
+    REPAIRED_SERVICES+=("omlx-stale-cleanup")
+  fi
+
+  status_msg "Starting oMLX inference engine..."
+  nohup "$OMLX_BIN" --model "$OMLX_MODEL" --port "$OMLX_PORT" --host 127.0.0.1 \
+    >> "$LOG_DIR/omlx.log" 2>&1 &
+  local omlx_pid=$!
+  log "oMLX process started (PID $omlx_pid, model $OMLX_MODEL)"
+
+  # The httpd binds immediately; model weights load lazily from the HF
+  # cache (~1s warm). First-EVER run downloads the model (~17GB) — we
+  # do NOT block launch on that: AgentX's 60s TTL probe picks oMLX up
+  # automatically once it's serving, and routing falls back to Ollama
+  # meanwhile.
+  local waited=0
+  while [[ $waited -lt 15 ]]; do
+    if check_omlx; then
+      log "oMLX healthy after ${waited}s"
+      STARTED_SERVICES+=("omlx")
+      return 0
+    fi
+    if ! is_pid_alive "$omlx_pid"; then
+      log "oMLX process died at ${waited}s — see $LOG_DIR/omlx.log"
+      DEGRADED_SERVICES+=("omlx")
+      return 0
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+
+  log "oMLX not healthy within ${waited}s (may be downloading model) — continuing; AgentX will auto-detect when ready"
+  DEGRADED_SERVICES+=("omlx")
+  return 0
+}
+
 # ─── Health Policy ─────────────────────────────────────────────────────────
 #
 # REQUIRED SERVICES (must be healthy for launch):
@@ -376,6 +442,10 @@ main() {
 
     # Still verify routes
     if check_dashboard_routes; then
+      # P13-A3 — heal optional inference sidecars even on the
+      # already-running fast path, so re-clicking the app icon
+      # restarts a dead oMLX without restarting AgentX itself.
+      ensure_omlx
       status_msg "AgentX already running — opening dashboard"
       open "$AGENTX_DASHBOARD"
       print_summary "RUNNING"
@@ -395,6 +465,7 @@ main() {
   # ─── Phase 3: Start optional services first ────────────────────────────
   status_msg "Checking services..."
   ensure_ollama
+  ensure_omlx
 
   # ─── Phase 4: Start web server (includes memory API via supervisor) ────
   # resilient_start_web_server attempts up to MAX_START_ATTEMPTS (3) times

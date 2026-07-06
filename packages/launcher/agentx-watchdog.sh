@@ -152,4 +152,26 @@ while true; do
       fi
     fi
   fi
+
+  # ── P13-A3: Check oMLX inference sidecar ──
+  # Optional: only supervised when the MLX venv is installed. A dead
+  # oMLX is restarted; AgentX routing falls back to Ollama meanwhile,
+  # so this is availability polish, never a hard dependency.
+  OMLX_PORT="${AGENTX_OMLX_PORT:-8080}"
+  OMLX_BIN="$HOME/.agentx/mlx-venv/bin/mlx_lm.server"
+  OMLX_MODEL="${AGENTX_OMLX_MODEL:-mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit}"
+  if [[ -x "$OMLX_BIN" ]] && ! check_http "http://127.0.0.1:${OMLX_PORT}/v1/models"; then
+    wd_log "oMLX down — restarting..."
+    omlx_pids=$(/usr/sbin/lsof -ti:"$OMLX_PORT" 2>/dev/null || true)
+    if [[ -n "$omlx_pids" ]]; then
+      echo "$omlx_pids" | xargs kill 2>/dev/null || true
+      sleep 1
+    fi
+    nohup "$OMLX_BIN" --model "$OMLX_MODEL" --port "$OMLX_PORT" --host 127.0.0.1 >> "$LOG_DIR/omlx.log" 2>&1 &
+    wd_log "oMLX restarted (PID $!)"
+    sleep 5
+    if check_http "http://127.0.0.1:${OMLX_PORT}/v1/models"; then
+      wd_log "oMLX recovered"
+    fi
+  fi
 done
