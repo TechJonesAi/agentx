@@ -402,6 +402,24 @@ export class OllamaProvider extends BaseLLMProvider {
   private extractToolCallsFromContent(content: string, startId: number): ToolCall[] {
     const calls: ToolCall[] = [];
     let callId = startId;
+
+    // Format 2a: bare "tool_name {json args}" — some models (observed with
+    // the fleet's instruct models) emit the tool name followed by the raw
+    // argument object, with no {"name": …} wrapper. Only accepted when the
+    // ENTIRE message is exactly that shape, so prose containing braces can
+    // never be misparsed as a call.
+    const bare = content.match(/^\s*([a-zA-Z_][\w.-]{1,63})\s*(\{[\s\S]*\})\s*$/);
+    if (bare) {
+      try {
+        const args = JSON.parse(bare[2]!) as Record<string, unknown>;
+        return [{
+          id: `call_${Date.now()}_${callId++}`,
+          name: bare[1]!,
+          arguments: args,
+        }];
+      } catch { /* not valid JSON — fall through to brace scanning */ }
+    }
+
     let i = 0;
     while (i < content.length) {
       const openIdx = content.indexOf('{', i);

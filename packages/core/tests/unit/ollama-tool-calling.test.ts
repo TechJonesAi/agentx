@@ -295,3 +295,64 @@ describe('OllamaProvider — accepted flag values', () => {
     });
   }
 });
+
+describe('bare "tool_name {args}" content fallback (leak fix)', () => {
+  const TOOLS = [{ name: 'memory_search', description: 'search', parameters: { type: 'object' as const, properties: {} } }];
+
+  function bareResponse(content: string): Record<string, unknown> {
+    return { message: { role: 'assistant', content }, eval_count: 1, prompt_eval_count: 1 };
+  }
+
+  it('parses "memory_search {json}" as a tool call instead of leaking it as text', async () => {
+    const flag = withFlag('true');
+    const mock = mockFetch(bareResponse('memory_search {"query": "what word did i say", "limit": 1}'));
+    try {
+      const p = new OllamaProvider('llama3');
+      const res = await p.complete({
+        messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+        tools: TOOLS,
+      });
+      expect(res.finishReason).toBe('tool_use');
+      expect(res.toolCalls).toHaveLength(1);
+      expect(res.toolCalls?.[0]?.name).toBe('memory_search');
+      expect(res.toolCalls?.[0]?.arguments).toEqual({ query: 'what word did i say', limit: 1 });
+      expect(res.content).toBe('');
+    } finally {
+      mock.restore();
+      flag.restore();
+    }
+  });
+
+  it('does NOT treat prose containing braces as a tool call', async () => {
+    const flag = withFlag('true');
+    const mock = mockFetch(bareResponse('The config uses {"debug": true} and that is fine to keep.'));
+    try {
+      const p = new OllamaProvider('llama3');
+      const res = await p.complete({
+        messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+        tools: TOOLS,
+      });
+      expect(res.finishReason).toBe('stop');
+      expect(res.content).toContain('that is fine to keep');
+    } finally {
+      mock.restore();
+      flag.restore();
+    }
+  });
+
+  it('does NOT fire on invalid JSON after a name-like token', async () => {
+    const flag = withFlag('true');
+    const mock = mockFetch(bareResponse('memory_search {not json at all'));
+    try {
+      const p = new OllamaProvider('llama3');
+      const res = await p.complete({
+        messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+        tools: TOOLS,
+      });
+      expect(res.finishReason).toBe('stop');
+    } finally {
+      mock.restore();
+      flag.restore();
+    }
+  });
+});
