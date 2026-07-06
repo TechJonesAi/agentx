@@ -549,7 +549,19 @@ export function Chat(): React.JSX.Element {
       <div className="chat-scroll" ref={scrollRef}>
         {messages.length === 0 ? (
           <div className="chat-empty">
-            <p>Start a conversation. Streaming, retrieval, and feedback are wired up.</p>
+            <p style={{ fontSize: '1.05rem', fontWeight: 600, marginBottom: 8 }}>
+              Welcome to AgentX — your private, local AI agent.
+            </p>
+            <p style={{ marginBottom: 12 }}>
+              Everything runs on this machine. Nothing leaves it.
+            </p>
+            <ul style={{ textAlign: 'left', display: 'inline-block', lineHeight: 1.9, color: 'var(--text-secondary, #8b949e)' }}>
+              <li>💬 Ask anything — or tap <strong>🎤</strong> and just talk</li>
+              <li>🔈 Turn <strong>Voice On</strong> for spoken replies and hands-free conversation</li>
+              <li>📄 Ask about your documents — answers cite their sources</li>
+              <li>🛠 Say <em>“build me an app that…”</em> and it scaffolds, builds, and validates it</li>
+              <li>👁 Drop images in the <strong>Vision</strong> tab for analysis and text extraction</li>
+            </ul>
           </div>
         ) : (
           messages.map((m) =>

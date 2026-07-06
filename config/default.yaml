@@ -121,3 +121,11 @@ security:
   auditRetentionDays: 90             # Auto-purge audit entries older than this
   localAuth: false                   # Require PIN/password to use agent
   autoLockMinutes: 30                # Auto-lock after inactivity (0 = disabled)
+
+# Ship activation — BuilderV2 app-generation pipeline + build learning.
+# builderV2: multi-agent scaffold → build → validate → repair orchestrator
+# buildLearning: BuildIntelligenceService records build outcomes and biases
+# future builds toward patterns that succeeded (self-learning).
+features:
+  builderV2: true
+  buildLearning: true

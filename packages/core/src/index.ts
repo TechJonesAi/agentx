@@ -262,3 +262,7 @@ export { ServiceSupervisor } from './services/supervisor.js';
 export type { ServiceDefinition } from './services/supervisor.js';
 export { ensureMemoryApi, getMemoryServiceDefinition } from './services/ensure-memory.js';
 export type { MemoryServiceConfig } from './services/ensure-memory.js';
+
+// ─── Licensing (monthly subscription keys, offline ed25519 verification) ──
+export { LicenseManager, verifyLicense, signLicense, generateKeypair, GRACE_PERIOD_MS } from './licensing/license.js';
+export type { LicenseStatus, LicensePayload } from './licensing/license.js';

@@ -30,6 +30,7 @@ import {
   saveMCPConfig,
   validateServerConfig,
   resolveDataDir,
+  LicenseManager,
   loadRoutingConfig,
   saveRoutingConfig,
   validateRoutingConfig,
@@ -172,9 +173,38 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
     return ttsRouter;
   };
 
+  // Monetisation — monthly license keys, verified offline (ed25519).
+  // Enforced ONLY when AGENTX_LICENSE_PUBLIC_KEY + AGENTX_LICENSE_REQUIRED
+  // are both set on the install, so dev/owner instances stay open.
+  const licenseManager = new LicenseManager({ dataDir: resolveDataDir() });
+
   return {
     async handle(method: string, url: string, req: http.IncomingMessage, res: http.ServerResponse) {
       const route = url.replace(/\?.*$/, ''); // strip query string
+
+      // ─── License endpoints (always reachable, even unlicensed) ──────
+      if (route === '/api/license/status' && method === 'GET') {
+        sendJson(res, 200, { enforced: licenseManager.enforced, ...licenseManager.status() });
+        return;
+      }
+      if (route === '/api/license/activate' && method === 'POST') {
+        const body = await parseBody(req);
+        const key = typeof body['key'] === 'string' ? body['key'] : '';
+        if (!key) { sendJson(res, 400, { error: 'key is required' }); return; }
+        const status = licenseManager.activate(key);
+        sendJson(res, status.state === 'valid' || status.state === 'grace' ? 200 : 422, status);
+        return;
+      }
+
+      // ─── License gate (health stays open so self-heal keeps working) ─
+      if (licenseManager.enforced && route !== '/api/health' && !licenseManager.allowed()) {
+        sendJson(res, 402, {
+          error: 'license required',
+          ...licenseManager.status(),
+          activateVia: 'POST /api/license/activate {"key": "AGX1.…"}',
+        });
+        return;
+      }
 
       // ─── Auth check (skip for health and voice webhooks) ────────────
       if (authToken && !route.startsWith('/voice/') && route !== '/api/health') {
@@ -630,10 +660,27 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
 
         if (route === '/api/build-memory/stats' && method === 'GET') {
-          sendJson(res, 200, {
-            recordedBuilds: 0, successfulPatterns: 0,
-            failedPatterns: 0, enabled: false,
-          });
+          // Real stats from the global learning store (was a hardcoded stub).
+          try {
+            const gls = (agent as unknown as {
+              getGlobalLearningService?: () => {
+                queryEvents(q: { subsystem?: string; limit?: number }): Array<{ outcome: string }>;
+              } | null;
+            }).getGlobalLearningService?.();
+            if (!gls) {
+              sendJson(res, 200, { recordedBuilds: 0, successfulPatterns: 0, failedPatterns: 0, enabled: false });
+              return;
+            }
+            const events = gls.queryEvents({ subsystem: 'build', limit: 1000 });
+            sendJson(res, 200, {
+              recordedBuilds: events.length,
+              successfulPatterns: events.filter((e) => e.outcome === 'success').length,
+              failedPatterns: events.filter((e) => e.outcome === 'failure').length,
+              enabled: true,
+            });
+          } catch (e) {
+            sendJson(res, 200, { recordedBuilds: 0, successfulPatterns: 0, failedPatterns: 0, enabled: false, error: String(e) });
+          }
           return;
         }
 
@@ -3684,14 +3731,38 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             prompt, appName, platform, workspace: wsRoot, sessionId: buildId,
           });
 
+          // Self-learning: every build outcome feeds the global learning
+          // store so future builds bias toward strategies that worked.
+          const recordOutcome = (result: unknown, error?: string) => {
+            try {
+              const gls = (agent as unknown as {
+                getGlobalLearningService?: () => { recordEvent(i: Record<string, unknown>): string } | null;
+              }).getGlobalLearningService?.();
+              if (!gls) return;
+              const r = (result ?? {}) as { status?: string; durationMs?: number; generatedFileCount?: number };
+              gls.recordEvent({
+                subsystem: 'build',
+                task_type: platform ?? 'web',
+                strategy: 'builder-v2',
+                outcome: error ? 'failure' : r.status === 'complete' ? 'success' : 'partial',
+                error_class: error ? error.slice(0, 120) : undefined,
+                duration_ms: r.durationMs,
+                context: { appName: appName ?? buildId, files: r.generatedFileCount },
+                session_id: buildId,
+              });
+            } catch { /* learning is best-effort — never fail a build over it */ }
+          };
+
           if (wait) {
             try {
               const result = await queue.submit({
                 id: buildId, appName: appName ?? buildId, prompt, workspace: wsPath, execute: exec,
               });
+              recordOutcome(result);
               sendJson(res, 200, { ok: true, id: buildId, result });
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
+              recordOutcome(null, msg);
               sendJson(res, 502, { ok: false, id: buildId, error: msg });
             }
             return;
@@ -3699,8 +3770,11 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           // Background mode — fire and forget, return immediately.
           queue.submit({
             id: buildId, appName: appName ?? buildId, prompt, workspace: wsPath, execute: exec,
+          }).then((result: unknown) => {
+            recordOutcome(result);
           }).catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
+            recordOutcome(null, msg);
             createLogger('web:builder/run').warn({ buildId, err: msg }, 'Background build failed');
           });
           sendJson(res, 200, { ok: true, id: buildId, status: 'queued', workspace: wsPath });

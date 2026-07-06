@@ -282,6 +282,29 @@ resilient_start_web_server() {
   return 1
 }
 
+# First-run experience: pull the MINIMUM models a fresh install needs.
+# nomic-embed-text (274MB) powers retrieval/memory; llama3.1:8b (4.9GB) is
+# the smallest chat-capable fleet model, so a brand-new machine can talk
+# within minutes. The large models (70b, qwen3 MoE, coder, vision) are
+# pulled on demand from the Models tab — never forced at first launch.
+ensure_core_models() {
+  check_ollama || return 0
+  local required=("nomic-embed-text" "llama3.1:8b")
+  local installed
+  installed=$(/usr/bin/curl -sf -m 5 http://127.0.0.1:11434/api/tags 2>/dev/null | /usr/bin/grep -o '"name":"[^"]*"' || true)
+  for model in "${required[@]}"; do
+    if ! echo "$installed" | /usr/bin/grep -q "$model"; then
+      status_msg "First run: downloading $model (one-time)..."
+      log "Pulling required model: $model"
+      if command -v ollama &>/dev/null; then
+        ollama pull "$model" >> "$LOG_DIR/ollama-pull.log" 2>&1 \
+          && log "Model $model ready" \
+          || log "WARNING: pull of $model failed — features needing it degrade until installed"
+      fi
+    fi
+  done
+}
+
 ensure_ollama() {
   if check_ollama; then
     log "Ollama already running"
@@ -558,6 +581,7 @@ main() {
   # ─── Phase 3: Start optional services first ────────────────────────────
   status_msg "Checking services..."
   ensure_ollama
+  ensure_core_models
   ensure_omlx
   ensure_tts
 
