@@ -275,6 +275,11 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   private _playbooks: PlaybookStore | null = null;
   /** P12-4 — Tool Forge: draft / approve / run sandboxed custom tools. */
   private _toolForge: ToolForge | null = null;
+  /** P13-A3 — oMLX provider (Apple-Silicon MLX, OpenAI-compatible, localhost-only). */
+  private _omlxProvider: OmlxProvider | null = null;
+  /** Cached oMLX reachability (probed with a TTL so routing stays cheap). */
+  private _omlxAvailable = false;
+  private _omlxLastProbe = 0;
   private _lastRetrievalIntent: QueryIntent | null = null;
   private _lastRetrievalResults: RetrievalResult[] = [];
   private _lastRetrievalMetadata: RetrievalMetadata | null = null;
@@ -529,6 +534,27 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       log.warn(
         { err: pbErr instanceof Error ? pbErr.message : String(pbErr) },
         'P12-3: PlaybookStore init failed — success memory disabled',
+      );
+    }
+
+    // ── P13-A3: oMLX provider — real end-to-end wiring ────────────────
+    // Constructed whenever an endpoint is configured (default
+    // localhost:8080). The constructor enforces localhost-only. A TTL
+    // probe (see _probeOmlx) gates routing: 'omlx' only enters
+    // availableProviders while /v1/models answers with ≥1 model, so a
+    // stopped MLX server can never strand a request. Execution falls
+    // back to Ollama on ANY oMLX error.
+    try {
+      const omlxEndpoint = process.env['AGENTX_OMLX_ENDPOINT'] ?? 'http://localhost:8080';
+      this._omlxProvider = new OmlxProvider({
+        endpoint: omlxEndpoint,
+        model: process.env['AGENTX_OMLX_MODEL'] ?? 'mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit',
+      });
+      log.info({ endpoint: omlxEndpoint }, 'P13-A3: oMLX provider constructed (availability probed lazily)');
+    } catch (omlxErr) {
+      log.warn(
+        { err: omlxErr instanceof Error ? omlxErr.message : String(omlxErr) },
+        'P13-A3: oMLX provider construction failed — Ollama-only',
       );
     }
 
@@ -1368,6 +1394,62 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   /** P13-A2 — accessor so the memory_search tool can reach document retrieval. */
   getRetrievalService(): RetrievalService | null { return this._retrievalService; }
 
+  /**
+   * P13-A3 — oMLX reachability with a 60s TTL. Fire-and-forget refresh:
+   * routing reads the CACHED flag (never blocks on the probe); the flag
+   * flips within a minute of the MLX server starting or stopping.
+   */
+  private _probeOmlx(): boolean {
+    const now = Date.now();
+    if (now - this._omlxLastProbe > 60_000) {
+      this._omlxLastProbe = now;
+      void (async () => {
+        try {
+          const endpoint = (process.env['AGENTX_OMLX_ENDPOINT'] ?? 'http://localhost:8080').replace(/\/+$/, '');
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 1500);
+          const r = await fetch(`${endpoint}/v1/models`, { signal: ctrl.signal });
+          clearTimeout(t);
+          const data = r.ok ? (await r.json()) as { data?: unknown[] } : null;
+          const nowUp = !!data && Array.isArray(data.data) && data.data.length > 0;
+          if (nowUp !== this._omlxAvailable) {
+            log.info({ available: nowUp }, 'P13-A3: oMLX availability changed');
+          }
+          this._omlxAvailable = nowUp;
+        } catch {
+          this._omlxAvailable = false;
+        }
+      })();
+    }
+    return this._omlxAvailable;
+  }
+
+  /**
+   * P13-A3 — Provider-evidence inputs for decideRoute. Feeds the Batch-10
+   * promotion path that existed but was never wired: benchmark comparison
+   * per task category + which providers are actually alive right now.
+   */
+  private _providerEvidenceInputs(taskType: string): {
+    providerEvidence: { winner: string | null; reasons: string[]; perProvider: Array<{ provider: string; samples: number; avgScore: number }> } | null;
+    availableProviders: string[];
+    providerDefaultModel: Record<string, string>;
+  } {
+    const available = ['ollama'];
+    if (this._omlxProvider && this._probeOmlx()) available.push('omlx');
+    let evidence: ReturnType<Agent['_providerEvidenceInputs']>['providerEvidence'] = null;
+    try {
+      const cmp = ProviderBenchmarkStore.get(this.db).compare(taskType);
+      evidence = { winner: cmp.winner, reasons: cmp.reasons, perProvider: cmp.perProvider };
+    } catch { /* no benchmark data yet */ }
+    return {
+      providerEvidence: evidence,
+      availableProviders: available,
+      providerDefaultModel: {
+        omlx: process.env['AGENTX_OMLX_MODEL'] ?? 'mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit',
+      },
+    };
+  }
+
   /** P13-A2 — read-only db handle for tool-side metadata lookups
    *  (document titles / chunk excerpts in memory_search results). */
   getDb(): Database.Database { return this.db; }
@@ -1819,6 +1901,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     // to the fixed default model. Route here so ALL completions benefit.
     // Skipped when the caller already set an explicit model, or when the
     // intelligence layer forced 'reasoning' capability (accuracy-first).
+    // P13-A3 — execution provider: normally Ollama; switched to oMLX when
+    // routing promotes it via benchmark evidence AND the server is alive.
+    let execProvider: BaseLLMProvider = this.provider;
     if (!options.model && options.capability !== 'reasoning') {
       try {
         const lastUser = [...options.messages].reverse().find((m) => m.role === 'user');
@@ -1864,12 +1949,23 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
             reliabilityAware: settings.autoRoutingMode === 'reliability-aware',
             taskDefaults: DEFAULT_TASK_MODEL_MAP,
             perModelHealth: TelemetryStore.getInstance().perModelHealth(),
+            // P13-A3 — benchmark-evidence provider promotion (ollama↔omlx)
+            ...this._providerEvidenceInputs(classification.primary),
           });
           if (decision.model && decision.model !== active.model) {
             options = { ...options, model: decision.model };
             log.info(
               { taskType: decision.taskType, model: decision.model, reason: decision.reason },
               'P12-1: non-stream completion routed by task type',
+            );
+          }
+          // P13-A3 — provider promotion: route this completion to oMLX
+          // when the engine picked it (benchmark winner + alive).
+          if (decision.provider === 'omlx' && this._omlxProvider && this._omlxAvailable) {
+            execProvider = this._omlxProvider;
+            log.info(
+              { taskType: decision.taskType, model: decision.model },
+              'P13-A3: completion promoted to oMLX provider',
             );
           }
           ModelRoutingHistory.getInstance().record({
@@ -1975,10 +2071,30 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     // Acquire rate limit slot
     await this.rateLimiter.acquire(estimatedTokens);
 
-    // Execute through circuit breaker + retry
+    // Execute through circuit breaker + retry. P13-A3: when the call is
+    // promoted to oMLX and oMLX fails, fall back to Ollama ONCE before
+    // the normal retry policy — a stopped MLX server must never fail a
+    // chat turn.
     const response = await this.llmCircuitBreaker.execute(() =>
       retryWithBackoff(
-        () => this.provider.complete(options),
+        async () => {
+          if (execProvider !== this.provider) {
+            try {
+              return await execProvider.complete(options);
+            } catch (omlxErr) {
+              log.warn(
+                { err: omlxErr instanceof Error ? omlxErr.message : String(omlxErr) },
+                'P13-A3: oMLX completion failed — falling back to Ollama',
+              );
+              this._omlxAvailable = false;
+              execProvider = this.provider;
+              // Strip the oMLX model id so Ollama uses its routed/default model.
+              const { model: _omlxModel, ...rest } = options;
+              options = rest as typeof options;
+            }
+          }
+          return this.provider.complete(options);
+        },
         {
           maxRetries: 3,
           baseDelayMs: 1000,
@@ -2630,6 +2746,8 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       // models; document / legal / medical / reasoning tasks stay on
       // the heavy default. User pins + preferred-models still win.
       taskDefaults: DEFAULT_TASK_MODEL_MAP,
+      // P13-A3 — benchmark-evidence provider promotion (ollama↔omlx)
+      ...this._providerEvidenceInputs(classification.primary),
       // Batch 6D — telemetry-driven model demotion. perModelHealth feeds
       // p95 latency + success rate so routing prefers healthy models.
       perModelHealth: TelemetryStore.getInstance().perModelHealth(),
@@ -2651,20 +2769,49 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     });
     const routingStartedAt = Date.now();
 
+    // P13-A3 — stream execution provider: oMLX when promoted + alive,
+    // with a one-shot Ollama fallback so a dead MLX server can't break
+    // the stream.
+    const streamProvider: BaseLLMProvider =
+      decision.provider === 'omlx' && this._omlxProvider && this._omlxAvailable
+        ? this._omlxProvider
+        : this.provider;
+    if (streamProvider !== this.provider) {
+      log.info({ taskType: decision.taskType, model: decision.model }, 'P13-A3: stream promoted to oMLX provider');
+    }
+
     // First response: stream it — pass the routed model as a per-call override
     // so the provider uses it without mutating shared state.
     let response: LLMResponse;
     try {
-      response = await this.provider.completeStream(
-        {
-          messages,
-          systemPrompt: augmentedSystemPromptStream,
-          tools: toolDefs.length > 0 ? toolDefs : undefined,
-          model: decision.model,
-          ...(this._resolveModelHint() ?? {}),
-        },
-        callbacks,
-      );
+      try {
+        response = await streamProvider.completeStream(
+          {
+            messages,
+            systemPrompt: augmentedSystemPromptStream,
+            tools: toolDefs.length > 0 ? toolDefs : undefined,
+            model: decision.model,
+            ...(this._resolveModelHint() ?? {}),
+          },
+          callbacks,
+        );
+      } catch (streamErr) {
+        if (streamProvider === this.provider) throw streamErr;
+        log.warn(
+          { err: streamErr instanceof Error ? streamErr.message : String(streamErr) },
+          'P13-A3: oMLX stream failed — falling back to Ollama',
+        );
+        this._omlxAvailable = false;
+        response = await this.provider.completeStream(
+          {
+            messages,
+            systemPrompt: augmentedSystemPromptStream,
+            tools: toolDefs.length > 0 ? toolDefs : undefined,
+            ...(this._resolveModelHint() ?? {}),
+          },
+          callbacks,
+        );
+      }
       const latencyMs = Date.now() - routingStartedAt;
       ModelRoutingHistory.getInstance().setLatency(routingId, latencyMs);
       // Batch 5 — telemetry: record per-call tokens-in/out + latency so the
