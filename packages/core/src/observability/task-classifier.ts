@@ -74,13 +74,16 @@ const RULES: Array<{ task: TaskType; weight: number; pattern: RegExp; label: str
   // tribunal bundle" must stay on the heavy model, not the fast lane.
   { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b[\w][\w\s'-]{0,40}\.(?:pdf|docx?|eml|png|jpe?g|txt)\b/i, label: 'filename-mention' },
   { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:clause|section|article|paragraph|schedule|annex)\s+\d{1,4}\b/i, label: 'statute-anchor' },
-  { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:tribunal|claimant|respondent|statute|magna\s+carta|et1|acas|dismissal|discrimination|reasonable\s+adjustments?|witness\s+statement|hearing\s+bundle)\b/i, label: 'legal-term' },
+  { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:tribunal|claimant|respondent|statute|magna\s+carta|et1|acas|dismissal|discrimination|reasonable\s+adjustments?|witness\s+statement|hearing\s+bundle|probate|executor|inheritance|estate\s+plan)\b/i, label: 'legal-term' },
   { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:diagnosis|patient|clinical|prognosis|gmc|prescription|symptom)\b/i, label: 'medical-term' },
   { task: 'retrieval-grounded-qa', weight: 7, pattern: /\b(?:in|from|across|search)\s+my\s+(?:stored\s+)?(?:documents?|files?|e-?mails?|library|inbox|messages)\b/i, label: 'corpus-phrase' },
   { task: 'memory-intensive', weight: 3, pattern: /\b(remember\s+when|earlier\s+(you|we)\s+(said|discussed|mentioned))\b/i, label: 'memory-recall' },
 
-  // Tool-heavy
-  { task: 'tool-heavy', weight: 3, pattern: /\b(run\s+(this\s+)?(command|shell|script)|execute|chain\s+of\s+tools)\b/i, label: 'tool-verb' },
+  // Tool-heavy — weight 6 clears the routing confidence gate so these
+  // route to the xLAM function-calling specialist. The pattern requires
+  // tool-ish context after the verb: a bare "execute" in prose ("execute
+  // a will") must NOT be fast-laned away from the heavy default.
+  { task: 'tool-heavy', weight: 6, pattern: /\b(run\s+(this\s+)?(command|shell|script)|execute\s+(?:the\s+|a\s+|this\s+)?(?:tool|command|script|chain|workflow|task)s?|chain\s+of\s+tools|use\s+your\s+tools)\b/i, label: 'tool-verb' },
 
   // Autonomous repair
   { task: 'autonomous-repair', weight: 5, pattern: /\b(self-?repair|auto-?repair|heal|fix\s+yourself|fix\s+the\s+system)\b/i, label: 'repair-verb' },

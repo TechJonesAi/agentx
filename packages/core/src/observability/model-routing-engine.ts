@@ -127,6 +127,9 @@ export const DEFAULT_TASK_MODEL_MAP: Partial<Record<TaskType, string>> = {
   'coding': 'qwen3-coder:30b',
   'vision': 'qwen3-vl:32b',
   'ocr': 'qwen3-vl:32b',
+  // xLAM is a function-calling specialist (Salesforce Large Action Model):
+  // far better at emitting well-formed tool calls than general chat models.
+  'tool-heavy': 'robbiemu/Salesforce_Llama-xLAM-2:8b-fc-r-q5_K_M',
   'multimodal': 'qwen3-vl:32b',
 };
 

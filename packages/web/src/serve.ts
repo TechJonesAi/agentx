@@ -30,6 +30,14 @@ async function main(): Promise<void> {
       'Memory API sidecar unavailable — continuing without it'),
   );
 
+  // Auto-benchmark: refresh Ollama-vs-oMLX evidence every 6h so routing
+  // promotions track real machine conditions instead of one stale run.
+  const { startAutoBenchmark } = await import('./server/auto-benchmark.js');
+  startAutoBenchmark(() =>
+    (agent as unknown as { getProviderBenchmarkStore?: () => { record(r: Record<string, unknown>): unknown } | null })
+      .getProviderBenchmarkStore?.() ?? null,
+  );
+
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
   console.log(`AgentX Web UI running on http://${displayHost}:${port}`);
 

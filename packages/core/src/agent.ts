@@ -607,6 +607,50 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
       this.toolRegistry.register(buildForgeDraftTool(this._toolForge));
       this.toolRegistry.register(buildForgeListTool(this._toolForge));
       log.info({ approvedLoaded: loaded }, 'P12-4: ToolForge wired (forge_tool + list_custom_tools registered)');
+
+      // POWER pass — spawn_agent: the model can create a purpose-built
+      // agent loop for a well-defined task (research, multi-step fixes,
+      // batch processing) instead of grinding through it inline. Gated on
+      // the same env flag as the dashboard route; absent flag = tool
+      // returns a clear "disabled" message rather than hiding.
+      this.toolRegistry.register({
+        definition: {
+          name: 'spawn_agent',
+          description:
+            'Spawn a task-specific autonomous agent loop for a well-defined goal '
+            + '(e.g. "collect and summarise every mention of X in my documents"). '
+            + 'The agent plans, executes with tools, and returns its final state. '
+            + 'Use for multi-step goals; NOT for simple questions.',
+          parameters: {
+            type: 'object',
+            properties: {
+              goal: { type: 'string', description: 'Clear, self-contained description of the task' },
+              constraints: {
+                type: 'array', items: { type: 'string' },
+                description: 'Optional hard constraints (e.g. "read-only", "max 5 steps")',
+              },
+            },
+            required: ['goal'],
+          },
+        },
+        execute: async (args: Record<string, unknown>) => {
+          if (process.env['AGENTX_ENABLE_AGENT_LOOPS'] !== 'true') {
+            return '[spawn_agent]: agent loops are disabled (set AGENTX_ENABLE_AGENT_LOOPS=true to enable)';
+          }
+          const goal = typeof args['goal'] === 'string' ? args['goal'].trim() : '';
+          if (!goal) return '[spawn_agent error]: goal is required';
+          const constraints = Array.isArray(args['constraints'])
+            ? (args['constraints'] as unknown[]).filter((c): c is string => typeof c === 'string').slice(0, 8)
+            : [];
+          try {
+            const state = await this.runAgentLoop(goal, undefined, constraints);
+            const st = state as unknown as { status?: string; steps?: unknown[]; summary?: string; result?: string };
+            return `[spawn_agent]: status=${st.status ?? 'done'} steps=${Array.isArray(st.steps) ? st.steps.length : '?'}\n${(st.summary ?? st.result ?? JSON.stringify(state)).toString().slice(0, 2000)}`;
+          } catch (e) {
+            return `[spawn_agent error]: ${e instanceof Error ? e.message : String(e)}`;
+          }
+        },
+      });
     } catch (tfErr) {
       log.warn(
         { err: tfErr instanceof Error ? tfErr.message : String(tfErr) },
@@ -1521,6 +1565,26 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
    * (both chat paths record one); retrieval stats from the last run.
    * Best-effort: never throws.
    */
+  /** Cached playbook recall. The semantic match costs an embedding HTTP
+   *  call; tool-loop iterations re-recalled for the SAME user text every
+   *  round, and recall ran serially after retrieval. Callers prefetch it
+   *  (fire-and-forget) so it overlaps the retrieval embedding, and the
+   *  promise cache de-duplicates repeat lookups within a turn. */
+  private _playbookRecallCache = new Map<string, Promise<Awaited<ReturnType<PlaybookStore['findBestSemantic']>> | null>>();
+  private _playbookRecall(taskType: string, text: string): Promise<Awaited<ReturnType<PlaybookStore['findBestSemantic']>> | null> {
+    if (!this._playbooks) return Promise.resolve(null);
+    const key = `${taskType}\u001f${text}`;
+    const hit = this._playbookRecallCache.get(key);
+    if (hit) return hit;
+    const p = this._playbooks.findBestSemantic(taskType, text).catch(() => null);
+    this._playbookRecallCache.set(key, p);
+    if (this._playbookRecallCache.size > 32) {
+      const oldest = this._playbookRecallCache.keys().next().value;
+      if (oldest !== undefined) this._playbookRecallCache.delete(oldest);
+    }
+    return p;
+  }
+
   private _recordPlaybookOutcome(input: string, responseContent: string, sessionId: string): void {
     if (!this._playbooks) return;
     try {
@@ -1977,9 +2041,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
           let playbookPreferred: string[] = [];
           try {
             // P13-B1 — semantic-first recall with keyword fallback.
-            const match = this._playbooks
-              ? await this._playbooks.findBestSemantic(classification.primary, userText)
-              : null;
+            const match = await this._playbookRecall(classification.primary, userText);
             if (match) {
               const hint = this._playbooks!.renderHintBlock(match);
               options = { ...options, systemPrompt: (options.systemPrompt ?? '') + hint };
@@ -2462,6 +2524,10 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
     this._runIntelligenceObservation(input);
 
+    // Prefetch the playbook recall so its embedding call overlaps the
+    // retrieval embedding instead of running serially after it.
+    void this._playbookRecall(classifyTask(input).primary, input);
+
     const retrievalContext = await this._buildRetrievalContext(input);
 
     // P12-2 — Inject the previous-session recap on the FIRST turn of a
@@ -2721,6 +2787,9 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     }
 
     this._runIntelligenceObservation(input);
+
+    // Prefetch playbook recall — overlaps the retrieval embedding.
+    void this._playbookRecall(classifyTask(input).primary, input);
 
     // retrieval-enabled toggle: when off, skip retrieval entirely. Record
     // the skip as a RetrievalOutcome so the dashboard reflects it.

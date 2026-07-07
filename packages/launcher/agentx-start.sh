@@ -292,7 +292,11 @@ warm_models() {
       -d '{"model":"qwen3:30b-a3b-instruct-2507-q4_K_M","messages":[{"role":"user","content":"hi"}],"stream":false,"keep_alive":"30m","options":{"num_predict":1}}' >/dev/null 2>&1
     /usr/bin/curl -sf -m 60 http://127.0.0.1:11434/api/embed \
       -d '{"model":"nomic-embed-text","input":"warm","keep_alive":"30m"}' >/dev/null 2>&1
-    log "Model warm-up complete (chat MoE + embeddings resident)"
+    # Heavy model too: legal/medical/doc questions shouldn't pay a 40GB
+    # cold load. 128GB RAM comfortably fits 70B + MoE + embeddings.
+    /usr/bin/curl -sf -m 300 http://127.0.0.1:11434/api/chat \
+      -d '{"model":"llama3.3:70b-instruct-q4_K_M","messages":[{"role":"user","content":"hi"}],"stream":false,"keep_alive":"30m","options":{"num_predict":1}}' >/dev/null 2>&1
+    log "Model warm-up complete (chat MoE + 70B + embeddings resident)"
   ) &
 }
 

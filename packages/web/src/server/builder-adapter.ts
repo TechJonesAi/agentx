@@ -84,6 +84,12 @@ function buildLlmFromAgent(agent: AgentLike): Builder2LLM {
           systemPrompt: request.systemPrompt,
           maxTokens: request.maxTokens,
           temperature: request.temperature,
+          // Builds are code generation — use the dedicated coder model
+          // instead of the general default (the 70B chat model was both
+          // slower and worse at emitting clean multi-file code).
+          model: providerId === 'ollama'
+            ? (process.env['AGENTX_BUILDER_MODEL'] ?? 'qwen3-coder:30b')
+            : undefined,
         });
         return {
           content: resp.content,

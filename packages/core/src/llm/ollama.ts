@@ -409,6 +409,21 @@ export class OllamaProvider extends BaseLLMProvider {
     const calls: ToolCall[] = [];
     let callId = startId;
 
+    // Format 2b: <tool_call>{"name":…,"arguments":…}</tool_call> — the
+    // qwen family's native textual format when not using native tool_calls.
+    const xmlCalls = [...content.matchAll(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g)];
+    if (xmlCalls.length > 0) {
+      for (const m of xmlCalls) {
+        try {
+          const parsed = JSON.parse(m[1]!) as { name?: string; arguments?: Record<string, unknown> };
+          if (parsed.name) {
+            calls.push({ id: `call_${Date.now()}_${callId++}`, name: parsed.name, arguments: parsed.arguments ?? {} });
+          }
+        } catch { /* malformed block — ignore */ }
+      }
+      if (calls.length > 0) return calls;
+    }
+
     // Format 2a: bare "tool_name {json args}" — some models (observed with
     // the fleet's instruct models) emit the tool name followed by the raw
     // argument object, with no {"name": …} wrapper. Only accepted when the

@@ -192,6 +192,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
   // Enforced ONLY when AGENTX_LICENSE_PUBLIC_KEY + AGENTX_LICENSE_REQUIRED
   // are both set on the install, so dev/owner instances stay open.
   const licenseManager = new LicenseManager({ dataDir: resolveDataDir() });
+  let licenseAttempts: number[] = [];
 
   return {
     async handle(method: string, url: string, req: http.IncomingMessage, res: http.ServerResponse) {
@@ -203,6 +204,15 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         return;
       }
       if (route === '/api/license/activate' && method === 'POST') {
+        // Brute-force guard: 10 attempts per minute per process is far
+        // beyond any legitimate use of a paste-a-key flow.
+        const nowMs = Date.now();
+        licenseAttempts = licenseAttempts.filter((t) => nowMs - t < 60_000);
+        if (licenseAttempts.length >= 10) {
+          sendJson(res, 429, { error: 'too many activation attempts — wait a minute' });
+          return;
+        }
+        licenseAttempts.push(nowMs);
         const body = await parseBody(req);
         const key = typeof body['key'] === 'string' ? body['key'] : '';
         if (!key) { sendJson(res, 400, { error: 'key is required' }); return; }

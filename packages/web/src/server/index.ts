@@ -135,6 +135,14 @@ export class WebServer {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+    // Security headers — cheap hardening for a localhost-first app that
+    // clients may still expose on a LAN. No CSP (the SPA inlines styles);
+    // these four close the common drive-by classes without breaking dev.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=()');
+
     if (method === 'OPTIONS') {
       res.writeHead(204);
       res.end();

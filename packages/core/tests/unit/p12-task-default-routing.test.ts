@@ -269,3 +269,29 @@ describe('userForceModel — absolute Settings override', () => {
     if (c.confidence >= 0.6) expect(d.model).toBe(INSTANT);
   });
 });
+
+describe('POWER pass — tool-heavy → xLAM routing', () => {
+  const XLAM = 'robbiemu/Salesforce_Llama-xLAM-2:8b-fc-r-q5_K_M';
+
+  it('explicit tool phrasing routes to the function-calling specialist', () => {
+    for (const q of ['run this command: ls -la', 'Please execute the chain of tools to sort my files']) {
+      const c = classifyTask(q);
+      expect(c.primary).toBe('tool-heavy');
+      const d = decideRoute(baseInputs({
+        classification: c,
+        installedLocalModels: [HEAVY, FAST_CHAT, INSTANT, XLAM],
+      }));
+      expect(d.model).toBe(XLAM);
+    }
+  });
+
+  it('"execute a will" (estate law) does NOT hit the tool lane', () => {
+    const c = classifyTask('How do I execute a will after a death in the family?');
+    expect(c.primary).not.toBe('tool-heavy');
+  });
+
+  it('probate/executor terms classify as retrieval-grounded-qa (stay heavy)', () => {
+    expect(classifyTask('What does probate involve for my late uncle?').primary).toBe('retrieval-grounded-qa');
+    expect(classifyTask('What are my duties as executor of the estate?').primary).toBe('retrieval-grounded-qa');
+  });
+});

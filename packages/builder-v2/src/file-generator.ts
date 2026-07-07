@@ -232,7 +232,14 @@ Web/React Guidelines:
 - Functional components only
 - Use React hooks (useState, useEffect, useCallback)
 - Include proper TypeScript types
-- Use CSS-in-JS or inline styles`
+- Use CSS-in-JS or inline styles
+
+Design quality bar (a professional must be happy to ship this):
+- Deliberate colour palette via CSS custom properties (:root), modern
+  typography, generous spacing — never unstyled defaults
+- Real layout with flexbox/grid; responsive at mobile widths
+- Tasteful polish: subtle shadows, rounded corners, hover/focus states
+- Accessible: semantic elements, labels on inputs, sufficient contrast`
       );
     }
 
