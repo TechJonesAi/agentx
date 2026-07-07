@@ -185,6 +185,8 @@ export function Chat(): React.JSX.Element {
   const handsFreeRef = useRef(false);
   const startListeningRef = useRef<(() => void) | null>(null);
   const handleSendRef = useRef<((overrideText?: string) => Promise<void>) | null>(null);
+  // Abort handle for the in-flight chat stream — powers the Stop button.
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   const speechGlobals = window as unknown as {
     SpeechRecognition?: new () => SpeechRecognitionLike;
@@ -403,6 +405,8 @@ export function Chat(): React.JSX.Element {
     // EventSource so we can POST a JSON body. Each event is a single
     // `data: <json>\n\n` line; we parse them as they arrive.
     try {
+      const abort = new AbortController();
+      chatAbortRef.current = abort;
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
@@ -412,6 +416,7 @@ export function Chat(): React.JSX.Element {
           // persona is currently cosmetic — server tolerates extra fields.
           persona,
         }),
+        signal: abort.signal,
       });
 
       if (!res.ok || !res.body) {
@@ -673,13 +678,36 @@ export function Chat(): React.JSX.Element {
             {listening ? '⏹' : '🎤'}
           </button>
         )}
-        <button
-          type="submit"
-          className="composer-send"
-          disabled={sending || (!input.trim() && attachments.length === 0)}
-        >
-          {sending ? '…' : 'Send'}
-        </button>
+        {sending ? (
+          <button
+            type="button"
+            className="composer-send"
+            style={{ background: '#da3633' }}
+            onClick={() => {
+              // Stop: abort the client stream AND tell the server to abort
+              // the run for this session. UI unblocks immediately.
+              chatAbortRef.current?.abort();
+              chatAbortRef.current = null;
+              handsFreeRef.current = false;
+              void fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: '/stop', sessionId }),
+              }).catch(() => { /* best-effort */ });
+            }}
+            title="Stop generating"
+          >
+            ⏹ Stop
+          </button>
+        ) : (
+          <button
+            type="submit"
+            className="composer-send"
+            disabled={!input.trim() && attachments.length === 0}
+          >
+            Send
+          </button>
+        )}
       </form>
       </div>
       <ChatSidebar />

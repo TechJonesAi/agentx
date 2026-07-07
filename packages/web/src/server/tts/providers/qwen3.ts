@@ -41,7 +41,10 @@ export class Qwen3Provider implements TtsProvider {
       ?? process.env['AGENTX_TTS_QWEN3_BASE_URL']
       ?? process.env['AGENTX_TTS_BASE_URL']
       ?? 'http://127.0.0.1:9880';
-    this.timeoutMs = timeoutMs ?? parseInt(process.env['AGENTX_TTS_TIMEOUT_MS'] ?? '60000', 10);
+    // Voice UX: if the neural voice can't answer fast, fall back to the
+    // local macOS voice instead of leaving the user in silence. 60s was
+    // far too patient — a hung/throttled sidecar blocked every reply.
+    this.timeoutMs = timeoutMs ?? parseInt(process.env['AGENTX_TTS_TIMEOUT_MS'] ?? '10000', 10);
     this.healthTimeoutMs = parseInt(process.env['AGENTX_TTS_HEALTH_TIMEOUT_MS'] ?? '2500', 10);
   }
 

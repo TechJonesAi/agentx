@@ -23,6 +23,8 @@ interface SyncStateSnapshot {
   lastSyncResult: Partial<SyncResult> | null;
   lastSyncError: string | null;
   pendingDocumentIds: string[];
+  /** cognitive-source document count at the last completed sync. */
+  lastCogCount: number | null;
 }
 
 const state: SyncStateSnapshot = {
@@ -30,6 +32,7 @@ const state: SyncStateSnapshot = {
   lastSyncResult: null,
   lastSyncError: null,
   pendingDocumentIds: [],
+  lastCogCount: null,
 };
 
 interface DbLike {
@@ -126,14 +129,12 @@ async function maybeAutoSync(agent: unknown): Promise<void> {
       log.warn({ err: (err as Error).message }, 'auto-sync count probe failed');
       return;
     }
-    let agentCount = 0;
-    try {
-      const r = agentDb.prepare('SELECT COUNT(*) AS n FROM documents').get() as { n?: number };
-      agentCount = Number(r?.n ?? 0);
-    } catch { return; /* table missing — skip */ }
-
-    if (cogCount === agentCount) return; // nothing new
-    log.info({ cogCount, agentCount }, 'Auto-sync detected new documents — running full sync');
+    // Sync only when the SOURCE changed since the last completed sync.
+    // Comparing cognitive vs agent counts looped forever: the agent DB
+    // legitimately holds extra documents (direct ingests), so the counts
+    // can never converge and a full sync fired every minute, endlessly.
+    if (state.lastCogCount !== null && cogCount === state.lastCogCount) return;
+    log.info({ cogCount, lastCogCount: state.lastCogCount }, 'Auto-sync detected new documents — running full sync');
     inFlight = true;
     try {
       const result = await syncCognitiveToRetrieval({
@@ -143,6 +144,7 @@ async function maybeAutoSync(agent: unknown): Promise<void> {
       state.lastSyncAt = Date.now();
       state.lastSyncResult = result;
       state.lastSyncError = null;
+      state.lastCogCount = cogCount;
       log.info({
         cog: result.cognitiveDocumentCount,
         wrote: result.documentsWritten,
