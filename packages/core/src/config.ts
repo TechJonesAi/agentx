@@ -99,9 +99,21 @@ export function loadConfig(configPath?: string): AgentConfig {
 
   let fileConfig: Partial<AgentConfig> = {};
 
+  // G5 — config profiles. AGENTX_CONFIG_PROFILE=client selects
+  // config/client.yaml (hardened defaults for machines you don't control)
+  // ahead of default.yaml. Unknown profile names just fall through.
+  const profile = (process.env['AGENTX_CONFIG_PROFILE'] ?? '').trim();
+  const profilePaths = profile && /^[a-z0-9-]+$/i.test(profile)
+    ? [
+        path.join(process.cwd(), 'config', `${profile}.yaml`),
+        path.join(process.cwd(), 'config', `${profile}.json`),
+      ]
+    : [];
+
   const paths = configPath
     ? [configPath]
     : [
+        ...profilePaths,
         path.join(process.cwd(), 'config', 'default.yaml'),
         path.join(process.cwd(), 'config', 'default.json'),
         path.join(resolveDataDir(), 'config.yaml'),

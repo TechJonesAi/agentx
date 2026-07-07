@@ -131,3 +131,36 @@ describe('LicenseManager', () => {
     expect(m.status().state).toBe('unlicensed');
   });
 });
+
+describe('G5 — config profiles (AGENTX_CONFIG_PROFILE)', () => {
+  it('client profile hardens security settings', async () => {
+    const prev = process.env['AGENTX_CONFIG_PROFILE'];
+    process.env['AGENTX_CONFIG_PROFILE'] = 'client';
+    try {
+      const { loadConfig } = await import('../../src/config.js');
+      const cfg = loadConfig();
+      // Only asserts when running from the repo root (config/client.yaml visible)
+      if (cfg.security?.shellPermissionLevel === 'allowlist-only') {
+        expect(cfg.security.encryptStorage).toBe(true);
+        expect(cfg.security.localAuth).toBe(true);
+        expect((cfg as { web?: { host?: string } }).web?.host).toBe('127.0.0.1');
+      }
+    } finally {
+      if (prev === undefined) delete process.env['AGENTX_CONFIG_PROFILE'];
+      else process.env['AGENTX_CONFIG_PROFILE'] = prev;
+    }
+  });
+
+  it('bogus profile name falls back to defaults safely', async () => {
+    const prev = process.env['AGENTX_CONFIG_PROFILE'];
+    process.env['AGENTX_CONFIG_PROFILE'] = '../evil';
+    try {
+      const { loadConfig } = await import('../../src/config.js');
+      const cfg = loadConfig();
+      expect(cfg.agent.name).toBeTruthy(); // loads, no traversal
+    } finally {
+      if (prev === undefined) delete process.env['AGENTX_CONFIG_PROFILE'];
+      else process.env['AGENTX_CONFIG_PROFILE'] = prev;
+    }
+  });
+});

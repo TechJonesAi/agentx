@@ -1,0 +1,62 @@
+# AgentX — CLIENT security profile.
+#
+# Select with:  export AGENTX_CONFIG_PROFILE=client
+# (loadConfig then prefers config/client.yaml over config/default.yaml)
+#
+# Same functional configuration as default.yaml, hardened for installs on
+# machines you don't control:
+#   - encrypted storage for sensitive DB columns
+#   - shell tool locked to an allowlist
+#   - local auth (PIN) + auto-lock
+#   - audit retained longer
+
+agent:
+  name: AgentX
+  defaultProvider: ollama
+  model: llama3.3:70b-instruct-q4_K_M
+  localOnly: true
+  intelligence:
+    enabled: true
+    observationOnly: true
+    influenceMode: off
+  retrieval:
+    enabled: true
+  entityIndexing:
+    enabled: true
+
+providers:
+  ollama:
+    model: llama3.3:70b-instruct-q4_K_M
+    baseUrl: http://localhost:11434
+
+memory:
+  maxConversationHistory: 100
+  summarizeAfter: 50
+  embeddingProvider: local
+
+sessions:
+  ttlMinutes: 1440
+
+web:
+  enabled: true
+  port: 3001
+  host: "127.0.0.1"        # NEVER 0.0.0.0 on client machines
+  authToken: ""             # set per-install for LAN exposure
+
+scheduler:
+  enabled: true
+  heartbeatIntervalMinutes: 60
+
+security:
+  sandboxShell: true
+  shellPermissionLevel: allowlist-only
+  maxShellTimeout: 30000
+  encryptStorage: true      # AES-256-GCM for sensitive DB columns
+  auditLog: true
+  auditRetentionDays: 365   # clients may need a full-year audit trail
+  localAuth: true           # PIN required (set on first launch)
+  autoLockMinutes: 15
+
+features:
+  builderV2: true
+  buildLearning: true
