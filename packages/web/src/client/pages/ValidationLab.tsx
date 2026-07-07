@@ -298,10 +298,10 @@ export function ValidationLab() {
                 <div className="content-card-title">{scenario.name}</div>
                 <span style={{
                   fontSize: 'var(--text-xs)', padding: '2px 8px', borderRadius: '10px',
-                  background: scenario.enabled ? 'rgba(0,212,170,0.15)' : 'rgba(255,107,107,0.15)',
-                  color: scenario.enabled ? '#00d4aa' : '#ff6b6b',
+                  background: scenario.enabled !== false ? 'rgba(0,212,170,0.15)' : 'rgba(255,107,107,0.15)',
+                  color: scenario.enabled !== false ? '#00d4aa' : '#ff6b6b',
                 }}>
-                  {scenario.enabled ? 'enabled' : 'disabled'}
+                  {scenario.enabled !== false ? 'enabled' : 'disabled'}
                 </span>
               </div>
               <div className="content-card-body">{scenario.description}</div>

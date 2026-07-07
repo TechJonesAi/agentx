@@ -692,7 +692,7 @@ function BrowseTab() {
                 </div>
 
                 {/* Metadata */}
-                {Object.keys(selectedItem.metadata).length > 0 && (
+                {Object.keys(selectedItem.metadata ?? {}).length > 0 && (
                   <div style={{
                     padding: '12px 20px', borderTop: '1px solid var(--border-primary)',
                     background: 'var(--bg-secondary)',
@@ -701,7 +701,7 @@ function BrowseTab() {
                       Metadata
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: '12px' }}>
-                      {Object.entries(selectedItem.metadata).map(([k, v]) => (
+                      {Object.entries(selectedItem.metadata ?? {}).map(([k, v]) => (
                         <React.Fragment key={k}>
                           <span style={{ color: 'var(--text-secondary)' }}>{k}:</span>
                           <span style={{ color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: '11px' }}>{String(v)}</span>
@@ -2718,7 +2718,10 @@ function StatsTab() {
         fetch('/api/memory/stats').then(r => r.ok ? r.json() : null),
       ]);
       if (buildRes.status === 'fulfilled' && buildRes.value) setStats(buildRes.value);
-      if (catRes.status === 'fulfilled' && catRes.value) setCatStats(catRes.value);
+      // Only accept the categorized-stats shape this panel renders —
+      // /api/memory/stats returns {counts,available} on this build, and
+      // setting that object crashed the tab on Object.entries(undefined).
+      if (catRes.status === 'fulfilled' && catRes.value?.byCategory) setCatStats(catRes.value);
       setLoading(false);
     };
     load();
@@ -2744,7 +2747,7 @@ function StatsTab() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 'var(--spacing-md)', marginBottom: 'var(--spacing-lg)' }}>
-            {Object.entries(catStats.byCategory).map(([cat, count]) => (
+            {Object.entries(catStats.byCategory ?? {}).map(([cat, count]) => (
               <div key={cat} style={{
                 padding: 'var(--spacing-md)', background: 'var(--bg-secondary)',
                 borderRadius: 'var(--radius-md)', border: '1px solid var(--border-primary)',
@@ -2757,7 +2760,7 @@ function StatsTab() {
           </div>
 
           <div style={{ display: 'flex', gap: 'var(--spacing-lg)', flexWrap: 'wrap' }}>
-            {Object.entries(catStats.byState).map(([state, count]) => {
+            {Object.entries(catStats.byState ?? {}).map(([state, count]) => {
               const colors: Record<string, string> = { active: '#10b981', archived: '#6b7280', consolidated: '#8b5cf6' };
               return (
                 <div key={state} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>

@@ -815,6 +815,9 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             running: false,
             enabled: loops || memoryApi,
             engines: { agentLoops: loops, memoryApi },
+            // The page's second badge reads status.memoryGateway.healthy —
+            // report the live memory-api health there so the badge is true.
+            memoryGateway: { healthy: memoryApi },
             jobs: [],
           });
           return;
@@ -1652,7 +1655,7 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         if (route === '/api/validation/scenarios' && method === 'GET') {
           try {
             const mod = await import('@agentx/core') as unknown as { VALIDATION_SCENARIOS: Array<{ name: string }> };
-            sendJson(res, 200, { available: true, scenarios: mod.VALIDATION_SCENARIOS.map((s) => ({ name: s.name })) });
+            sendJson(res, 200, { available: true, scenarios: mod.VALIDATION_SCENARIOS.map((s) => ({ name: s.name, enabled: true })) });
           } catch (e) {
             sendJson(res, 200, { available: false, scenarios: [], error: String(e) });
           }
