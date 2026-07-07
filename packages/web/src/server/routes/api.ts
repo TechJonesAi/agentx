@@ -222,6 +222,19 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
           return;
         }
 
+        // ─── Client crash reports (PageErrorBoundary) ────────────────────
+        // A tab that crashes in the browser logs here so the failure is
+        // diagnosable from server logs even after the user refreshes.
+        if (route === '/api/client-error' && method === 'POST') {
+          const body = await parseBody(req);
+          createLogger('web:client-error').error({
+            page: body['page'], message: body['message'],
+            stack: body['stack'], componentStack: body['componentStack'],
+          }, 'Client page crash');
+          sendJson(res, 200, { logged: true });
+          return;
+        }
+
         // ─── Providers (R+: provider availability for UI/diagnostics) ──
         if (route === '/api/providers' && method === 'GET') {
           const config = agent.getConfig();

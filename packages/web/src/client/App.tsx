@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PageErrorBoundary } from './components/PageErrorBoundary';
 import { CommandPalette, type Command } from './components/CommandPalette';
 import { Dashboard } from './pages/Dashboard';
 import { Chat } from './pages/Chat';
@@ -330,7 +331,9 @@ export function App() {
       <div className="app-content">
         <Sidebar currentPage={currentPage} onPageChange={setCurrentPage} />
         <main className="main-content">
-          {renderPage()}
+          <PageErrorBoundary pageKey={currentPage}>
+            {renderPage()}
+          </PageErrorBoundary>
         </main>
       </div>
       <OfflineIndicator />

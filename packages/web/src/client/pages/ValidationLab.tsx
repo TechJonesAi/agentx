@@ -121,11 +121,11 @@ export function ValidationLab() {
     return () => { cancelled = true; };
   }, []);
 
-  const categories = ['all', ...new Set(scenarios.map(s => s.category))];
+  const categories = ['all', ...new Set(scenarios.map(s => s.category ?? 'general'))];
 
   const filteredScenarios = selectedCategory === 'all'
     ? scenarios
-    : scenarios.filter(s => s.category === selectedCategory);
+    : scenarios.filter(s => (s.category ?? 'general') === selectedCategory);
 
   const handleRunSuite = useCallback(async () => {
     setIsRunning(true);
@@ -257,7 +257,7 @@ export function ValidationLab() {
       <div style={{ display: 'flex', gap: 'var(--spacing-xs)', marginBottom: 'var(--spacing-lg)' }}>
         {([
           { id: 'scenarios' as TabId, label: 'Scenarios', count: filteredScenarios.length },
-          { id: 'results' as TabId, label: 'Results', count: lastReport?.runs.length || 0 },
+          { id: 'results' as TabId, label: 'Results', count: lastReport?.runs?.length || 0 },
           { id: 'regressions' as TabId, label: 'Regressions', count: lastReport?.regressions.length || 0 },
           { id: 'suggestions' as TabId, label: 'Suggestions', count: lastReport?.suggestions.length || 0 },
           { id: 'proposals' as TabId, label: 'Proposals', count: lastReport?.proposals.length || 0 },
@@ -319,7 +319,7 @@ export function ValidationLab() {
                 }}>
                   {scenario.category}
                 </span>
-                {scenario.tags.map(tag => (
+                {(scenario.tags ?? []).map(tag => (
                   <span key={tag} style={{
                     fontSize: 'var(--text-xs)', padding: '2px 6px', borderRadius: '10px',
                     background: 'var(--bg-secondary)', color: 'var(--text-tertiary)',
@@ -343,7 +343,7 @@ export function ValidationLab() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>
-              {lastReport.runs.map(run => (
+              {(lastReport.runs ?? []).map(run => (
                 <div key={run.id} className="content-card" style={{ cursor: 'pointer' }}
                   onClick={() => setExpandedRun(expandedRun === run.id ? null : run.id)}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
@@ -396,9 +396,9 @@ export function ValidationLab() {
                     </span>
                   </div>
 
-                  {expandedRun === run.id && run.failures.length > 0 && (
+                  {expandedRun === run.id && (run.failures?.length ?? 0) > 0 && (
                     <div style={{ marginTop: 'var(--spacing-md)', paddingTop: 'var(--spacing-md)', borderTop: '1px solid var(--border-color)' }}>
-                      {run.failures.map((f, i) => (
+                      {(run.failures ?? []).map((f, i) => (
                         <div key={i} style={{ marginBottom: 'var(--spacing-sm)', fontSize: 'var(--text-sm)' }}>
                           <div style={{ display: 'flex', gap: 'var(--spacing-sm)', marginBottom: '4px' }}>
                             <span style={{
@@ -426,7 +426,7 @@ export function ValidationLab() {
 
       {activeTab === 'regressions' && (
         <div>
-          {(!lastReport || lastReport.regressions.length === 0) ? (
+          {(!lastReport?.regressions || lastReport.regressions.length === 0) ? (
             <div className="content-card">
               <div className="content-card-body" style={{ textAlign: 'center', padding: 'var(--spacing-2xl)' }}>
                 No regressions detected.
@@ -434,7 +434,7 @@ export function ValidationLab() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>
-              {lastReport.regressions.map((r, i) => (
+              {(lastReport.regressions ?? []).map((r, i) => (
                 <div key={i} className="content-card">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--spacing-md)' }}>
                     <span style={{
@@ -467,7 +467,7 @@ export function ValidationLab() {
 
       {activeTab === 'suggestions' && (
         <div>
-          {(!lastReport || lastReport.suggestions.length === 0) ? (
+          {(!lastReport?.suggestions || lastReport.suggestions.length === 0) ? (
             <div className="content-card">
               <div className="content-card-body" style={{ textAlign: 'center', padding: 'var(--spacing-2xl)' }}>
                 No repair suggestions generated.
@@ -475,7 +475,7 @@ export function ValidationLab() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-sm)' }}>
-              {lastReport.suggestions.map(s => (
+              {(lastReport.suggestions ?? []).map(s => (
                 <div key={s.id} className="content-card">
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                     <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{s.issue}</span>

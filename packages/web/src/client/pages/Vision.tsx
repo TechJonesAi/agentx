@@ -165,10 +165,11 @@ export function Vision() {
         throw new Error(data.message || `Analysis failed: ${response.statusText}`);
       }
 
-      // Map results to display format
+      // Map results to display format (defensive: error responses have no array)
+      const resultsArr = Array.isArray(data.results) ? data.results : [];
       const newResults: AnalysisResult[] = [];
-      for (let i = 0; i < data.results.length; i++) {
-        const result = data.results[i];
+      for (let i = 0; i < resultsArr.length; i++) {
+        const result = resultsArr[i];
         newResults.push({
           text: result.analysis || 'No analysis available',
           imageUrl: images[i]?.preview,
