@@ -77,13 +77,14 @@ describe('P12-1 classifier hardening — legal/doc queries stay heavy', () => {
 });
 
 describe('P12-1 decideRoute step 2.5 — task defaults', () => {
-  it('chat routes to the fast MoE model', () => {
+  it('chat routes to the fast MoE model EVEN at default confidence', () => {
+    // Perf fix: 'chat' is the no-match default class (confidence 0.5 by
+    // construction). Gating it sent every ordinary conversation to the
+    // 70B (~30s/reply). Chat now always takes the fast MoE; heavy tasks
+    // (legal/medical/doc/reasoning) classify separately and stay heavy.
     const d = decideRoute(baseInputs({ classification: classifyTask('Tell me an interesting fact about space and how are you doing') }));
-    // 'chat' default classification confidence is 0.5 (< 0.6 gate) — the
-    // gate should make it fall through to the heavy default.
-    // Only high-confidence light classifications route fast.
-    if (d.taskType === 'chat' && d.classificationConfidence < 0.6) {
-      expect(d.model).toBe(HEAVY);
+    if (d.taskType === 'chat') {
+      expect(d.model).toBe(FAST_CHAT);
     }
   });
 

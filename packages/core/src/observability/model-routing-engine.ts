@@ -232,7 +232,12 @@ export function decideRoute(inputs: RoutingInputs): RoutingDecision {
   // we fall through to the heavy default.
   const taskDefault = inputs.taskDefaults?.[t];
   if (taskDefault && taskDefault !== inputs.defaultModel) {
-    if (inputs.classification.confidence < 0.6) {
+    // Confidence gate — but NOT for 'chat': chat is the no-match DEFAULT
+    // class (confidence 0.5 by construction), so gating it sent every
+    // ordinary conversation to the 70B heavy model (~30s/reply). Anything
+    // that must stay heavy (legal / medical / doc-grounded / reasoning)
+    // classifies as its own type at weight 7 and never reaches this arm.
+    if (t !== 'chat' && inputs.classification.confidence < 0.6) {
       fallbackChain.push({ model: taskDefault, skipped: `task-default skipped: classification confidence ${inputs.classification.confidence} < 0.6` });
     } else if (inputs.disabledModels.includes(taskDefault)) {
       fallbackChain.push({ model: taskDefault, skipped: 'task-default disabled' });
@@ -243,6 +248,30 @@ export function decideRoute(inputs: RoutingInputs): RoutingDecision {
       if (degr.degraded) {
         fallbackChain.push({ model: taskDefault, skipped: degr.reason ?? 'telemetry-degraded' });
       } else {
+        // P13-A3 extension: benchmark-evidence provider promotion applies
+        // to task-default routing too. The evidence inputs are already
+        // scoped to this task type, so when the fast lane (oMLX) wins the
+        // benchmarks for e.g. 'chat', serve the task there — previously
+        // promotion only fired on the final default branch, so the fast
+        // lane never accelerated task-routed traffic.
+        if (
+          inputs.reliabilityAware
+          && inputs.providerEvidence?.winner
+          && inputs.providerEvidence.winner !== inputs.defaultProvider
+          && (inputs.availableProviders ?? []).includes(inputs.providerEvidence.winner)
+          && inputs.providerDefaultModel?.[inputs.providerEvidence.winner]
+        ) {
+          const w = inputs.providerEvidence.winner;
+          return {
+            model: inputs.providerDefaultModel[w]!,
+            provider: w,
+            reason: `task-default '${t}' promoted to ${w} via benchmark: ${inputs.providerEvidence.reasons.join(' · ')}`,
+            pinUsed: false,
+            fallbackChain: [...fallbackChain, { model: taskDefault, skipped: `provider promoted: benchmark winner is ${w}` }],
+            taskType: t,
+            classificationConfidence: inputs.classification.confidence,
+          };
+        }
         return {
           model: taskDefault,
           provider: inputs.defaultProvider,

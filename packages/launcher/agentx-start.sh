@@ -282,6 +282,20 @@ resilient_start_web_server() {
   return 1
 }
 
+# Warm the primary chat + embedding models in the background so the FIRST
+# message doesn't pay a cold model load (30-60s for large weights). The
+# 30-minute keep_alive then keeps them resident between messages.
+warm_models() {
+  check_ollama || return 0
+  (
+    /usr/bin/curl -sf -m 240 http://127.0.0.1:11434/api/chat \
+      -d '{"model":"qwen3:30b-a3b-instruct-2507-q4_K_M","messages":[{"role":"user","content":"hi"}],"stream":false,"keep_alive":"30m","options":{"num_predict":1}}' >/dev/null 2>&1
+    /usr/bin/curl -sf -m 60 http://127.0.0.1:11434/api/embed \
+      -d '{"model":"nomic-embed-text","input":"warm","keep_alive":"30m"}' >/dev/null 2>&1
+    log "Model warm-up complete (chat MoE + embeddings resident)"
+  ) &
+}
+
 # First-run experience: pull the MINIMUM models a fresh install needs.
 # nomic-embed-text (274MB) powers retrieval/memory; llama3.1:8b (4.9GB) is
 # the smallest chat-capable fleet model, so a brand-new machine can talk
@@ -582,6 +596,7 @@ main() {
   status_msg "Checking services..."
   ensure_ollama
   ensure_core_models
+  warm_models
   ensure_omlx
   ensure_tts
 

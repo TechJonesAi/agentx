@@ -136,6 +136,9 @@ export class OllamaProvider extends BaseLLMProvider {
       messages,
       stream: false,
       options: { num_ctx: this.getNumCtx() },
+      // Keep models resident between messages — Ollama's 5-minute default
+      // unload meant a 20-40GB cold reload mid-conversation.
+      keep_alive: process.env['AGENTX_OLLAMA_KEEP_ALIVE'] ?? '30m',
     };
     if (tools.length > 0) {
       body.tools = tools;
@@ -217,6 +220,9 @@ export class OllamaProvider extends BaseLLMProvider {
       messages,
       stream: true,
       options: { num_ctx: this.getNumCtx() },
+      // Keep models resident between messages — Ollama's 5-minute default
+      // unload meant a 20-40GB cold reload mid-conversation.
+      keep_alive: process.env['AGENTX_OLLAMA_KEEP_ALIVE'] ?? '30m',
     };
     if (tools.length > 0) {
       body.tools = tools;
