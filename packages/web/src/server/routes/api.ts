@@ -760,18 +760,28 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
               } | null;
             }).getGlobalLearningService?.();
             if (!gls) {
-              sendJson(res, 200, { recordedBuilds: 0, successfulPatterns: 0, failedPatterns: 0, enabled: false });
+              sendJson(res, 200, { recordedBuilds: 0, successfulPatterns: 0, failedPatterns: 0, totalBuilds: 0, successRate: 0, enabled: false, connected: false });
               return;
             }
             const events = gls.queryEvents({ subsystem: 'build', limit: 1000 });
+            const ok = events.filter((e) => e.outcome === 'success').length;
+            const failed = events.filter((e) => e.outcome === 'failure').length;
+            // `connected` reflects that the store's DB handle is live — if
+            // queryEvents returned (no throw), it is. The page's badge reads
+            // this; omitting it showed a false 'waiting for DB connection'
+            // even though the DB was recording. totalBuilds/successRate feed
+            // the stat cards.
             sendJson(res, 200, {
               recordedBuilds: events.length,
-              successfulPatterns: events.filter((e) => e.outcome === 'success').length,
-              failedPatterns: events.filter((e) => e.outcome === 'failure').length,
+              successfulPatterns: ok,
+              failedPatterns: failed,
+              totalBuilds: events.length,
+              successRate: events.length > 0 ? Math.round((ok / events.length) * 100) : 0,
               enabled: true,
+              connected: true,
             });
           } catch (e) {
-            sendJson(res, 200, { recordedBuilds: 0, successfulPatterns: 0, failedPatterns: 0, enabled: false, error: String(e) });
+            sendJson(res, 200, { recordedBuilds: 0, successfulPatterns: 0, failedPatterns: 0, totalBuilds: 0, successRate: 0, enabled: false, connected: false, error: String(e) });
           }
           return;
         }
