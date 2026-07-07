@@ -15,6 +15,7 @@ import { LovevoiceProvider } from './providers/lovevoice.js';
 import { NaturalReaderProvider } from './providers/naturalreader.js';
 import { SpeechMAProvider } from './providers/speechma.js';
 import { MacOsSayProvider } from './providers/macos-say.js';
+import { PiperProvider } from './providers/piper.js';
 
 // ─── Circuit breaker state per provider ─────────────────────────────────────
 
@@ -292,11 +293,14 @@ export class TtsRouter {
 export function createTtsRouter(): TtsRouter {
   const providers: TtsProvider[] = [
     new Qwen3Provider(),
+    // Piper — fully-local neural voice (no cloud, works offline). Ranked
+    // above the cloud fallbacks and macOS say; below qwen3 on quality.
+    new PiperProvider(),
     new LovevoiceProvider(),
     new NaturalReaderProvider(),
     new SpeechMAProvider(),
-    // Local OS fallback — last in the list so qwen3 is preferred whenever
-    // it's healthy, but TTS still works on a stock macOS dev box.
+    // Local OS fallback — last in the list so neural voices are preferred
+    // whenever available, but TTS still works on a stock macOS dev box.
     new MacOsSayProvider(),
   ];
   return new TtsRouter(providers);

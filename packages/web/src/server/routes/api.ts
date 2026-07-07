@@ -10,6 +10,7 @@ import type { Agent } from '@agentx/core';
 import { createLogger } from '@agentx/core';
 import { tryUnsupportedSpaShim, unknownEndpointEnvelope } from './spa-shims.js';
 import { createTtsRouter, type TtsRouter } from '../tts/index.js';
+import { sttAvailable, transcribe } from '../stt.js';
 import {
   listMemoryItems,
   getMemoryDetail,
@@ -249,6 +250,37 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // that were really just old JS talking to new APIs).
         if (route === '/api/health' && method === 'GET') {
           sendJson(res, 200, { ok: true, timestamp: new Date().toISOString(), bundle: getBundleVersion() });
+          return;
+        }
+
+        // ─── Local speech-to-text (mlx-whisper) ──────────────────────────
+        if (route === '/api/stt/health' && method === 'GET') {
+          sendJson(res, 200, { available: sttAvailable(), engine: 'mlx-whisper' });
+          return;
+        }
+        if (route === '/api/stt' && method === 'POST') {
+          try {
+            let audio: Buffer | null = null;
+            let hint = 'audio.webm';
+            const ct = String(req.headers['content-type'] ?? '');
+            if (ct.startsWith('multipart/')) {
+              const parsed = await parseMultipartBody(req, { maxBytes: 25 * 1024 * 1024 });
+              const part = parsed.files.find((f) => f.data && f.data.length > 0);
+              if (part) { audio = part.data; hint = part.filename ?? hint; }
+            } else {
+              const chunks: Buffer[] = [];
+              for await (const c of req) chunks.push(c as Buffer);
+              audio = Buffer.concat(chunks);
+            }
+            if (!audio || audio.length < 128) {
+              sendJson(res, 400, { error: 'no audio supplied' });
+              return;
+            }
+            const text = await transcribe(audio, hint);
+            sendJson(res, 200, { text });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
           return;
         }
 

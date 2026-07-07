@@ -193,16 +193,123 @@ export function Chat(): React.JSX.Element {
     webkitSpeechRecognition?: new () => SpeechRecognitionLike;
   };
   const RecognitionCtor = speechGlobals.SpeechRecognition ?? speechGlobals.webkitSpeechRecognition;
-  const micSupported = Boolean(RecognitionCtor);
+  const micSupported = Boolean(RecognitionCtor) || Boolean(navigator.mediaDevices?.getUserMedia);
 
-  const stopListening = useCallback(() => {
-    handsFreeRef.current = false;
-    try { recognitionRef.current?.stop(); } catch { /* already stopped */ }
-    recognitionRef.current = null;
+  // Local STT (mlx-whisper): when /api/stt is available we record audio
+  // on-device and transcribe LOCALLY instead of using the browser's
+  // SpeechRecognition (which ships audio to a cloud engine). A simple RMS
+  // silence detector auto-stops after ~1.4s of quiet, ChatGPT-style.
+  const localSttRef = useRef<boolean | null>(null);
+  const mediaRef = useRef<{ rec: MediaRecorder; stream: MediaStream; ctx: AudioContext; raf: number } | null>(null);
+
+  const probeLocalStt = useCallback(async (): Promise<boolean> => {
+    if (localSttRef.current !== null) return localSttRef.current;
+    try {
+      const r = await fetch('/api/stt/health');
+      const d = await r.json();
+      localSttRef.current = !!d.available;
+    } catch { localSttRef.current = false; }
+    return localSttRef.current;
+  }, []);
+
+  const stopLocalRecording = useCallback((discard = false) => {
+    const m = mediaRef.current;
+    if (!m) return;
+    mediaRef.current = null;
+    cancelAnimationFrame(m.raf);
+    try { if (m.rec.state !== 'inactive') { if (discard) m.rec.ondataavailable = null; m.rec.stop(); } } catch { /* noop */ }
+    m.stream.getTracks().forEach((t) => t.stop());
+    void m.ctx.close().catch(() => undefined);
     setListening(false);
   }, []);
 
+  const startLocalRecording = useCallback(async () => {
+    if (mediaRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const rec = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '' });
+      const chunks: Blob[] = [];
+      rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      rec.onstop = async () => {
+        setListening(false);
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        if (blob.size < 2000) {
+          // Too short / silence: in hands-free mode re-arm, else drop.
+          if (handsFreeRef.current) setTimeout(() => startListeningRef.current?.(), 400);
+          return;
+        }
+        setInput('Transcribing…');
+        try {
+          const r = await fetch('/api/stt', { method: 'POST', headers: { 'Content-Type': 'audio/webm' }, body: blob });
+          const d = await r.json();
+          const text = (d.text ?? '').trim();
+          setInput('');
+          if (text) void handleSendRef.current?.(text);
+          else if (handsFreeRef.current) setTimeout(() => startListeningRef.current?.(), 400);
+        } catch {
+          setInput('');
+        }
+      };
+
+      // RMS-based silence auto-stop: stop after 1.4s of quiet once the
+      // user has spoken for at least 0.6s.
+      const ctx = new AudioContext();
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      let spokeAt = 0;
+      let quietSince = 0;
+      const started = Date.now();
+      const tick = () => {
+        const m = mediaRef.current;
+        if (!m) return;
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+        const rms = Math.sqrt(sum / buf.length);
+        const now = Date.now();
+        if (rms > 0.015) { spokeAt = spokeAt || now; quietSince = 0; }
+        else if (!quietSince) quietSince = now;
+        const spokeLongEnough = spokeAt && now - spokeAt > 600;
+        const quietLongEnough = quietSince && now - quietSince > 1400;
+        const maxed = now - started > 60_000;
+        if ((spokeLongEnough && quietLongEnough) || maxed) {
+          stopLocalRecording();
+          return;
+        }
+        m.raf = requestAnimationFrame(tick);
+      };
+      mediaRef.current = { rec, stream, ctx, raf: 0 };
+      rec.start();
+      setListening(true);
+      mediaRef.current.raf = requestAnimationFrame(tick);
+    } catch {
+      // Mic permission denied or no device — fall back to browser STT.
+      localSttRef.current = false;
+      startListeningRef.current?.();
+    }
+  }, [stopLocalRecording]);
+
+  const stopListening = useCallback(() => {
+    handsFreeRef.current = false;
+    if (mediaRef.current) { stopLocalRecording(true); return; }
+    try { recognitionRef.current?.stop(); } catch { /* already stopped */ }
+    recognitionRef.current = null;
+    setListening(false);
+  }, [stopLocalRecording]);
+
   const startListening = useCallback(() => {
+    if (recognitionRef.current || mediaRef.current) return;
+    // Prefer fully-local transcription when the server offers it.
+    void probeLocalStt().then((local) => {
+      if (local) { void startLocalRecording(); return; }
+      startBrowserRecognition();
+    });
+  }, [probeLocalStt, startLocalRecording]);
+
+  const startBrowserRecognition = useCallback(() => {
     if (!RecognitionCtor || recognitionRef.current) return;
     const rec = new RecognitionCtor();
     rec.lang = navigator.language || 'en-GB';
