@@ -18,6 +18,8 @@ import { SessionManager, SendPolicyManager, SessionPruner, CompactionManager, pa
 import type { SessionStore } from './sessions/index.js';
 import type { InboundContext } from './types.js';
 import type { CommandContext } from './sessions/commands.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { loadConfig, ensureDataDir } from './config.js';
 import { createLogger } from './logger.js';
 import { AuditLogger } from './security/audit.js';
@@ -1452,6 +1454,32 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
   }
 
   /**
+   * Live user override from ~/.agentx/routing.json (Settings → Default
+   * Model). Read per request with an mtime cache so a pin applies
+   * IMMEDIATELY — previously forceModel was only consulted at provider
+   * construction (server boot) and then overridden by task routing, so
+   * the Settings dropdown appeared to do nothing.
+   */
+  private _forceModelCache: { mtimeMs: number; value: string | null } | null = null;
+  private _getUserForceModel(): string | null {
+    try {
+      const p = path.join(ensureDataDir(), 'routing.json');
+      const stat = fs.statSync(p);
+      if (this._forceModelCache && this._forceModelCache.mtimeMs === stat.mtimeMs) {
+        return this._forceModelCache.value;
+      }
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf-8')) as { forceModel?: unknown };
+      const value = typeof parsed.forceModel === 'string' && parsed.forceModel.trim().length > 0
+        ? parsed.forceModel.trim()
+        : null;
+      this._forceModelCache = { mtimeMs: stat.mtimeMs, value };
+      return value;
+    } catch {
+      return null; // no routing.json → no override
+    }
+  }
+
+  /**
    * P13-A3 — Provider-evidence inputs for decideRoute. Feeds the Batch-10
    * promotion path that existed but was never wired: benchmark comparison
    * per task category + which providers are actually alive right now.
@@ -1966,6 +1994,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
           } catch { /* playbooks are best-effort */ }
           const decision = decideRoute({
             classification,
+            userForceModel: this._getUserForceModel(),
             defaultProvider: active.provider,
             defaultModel: active.model,
             pins: settings.modelPins,
@@ -2761,6 +2790,7 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     const active = this.getActiveModel();
     const decision: RoutingDecision = decideRoute({
       classification,
+      userForceModel: this._getUserForceModel(),
       defaultProvider: active.provider,
       defaultModel: active.model,
       pins: settings.modelPins,

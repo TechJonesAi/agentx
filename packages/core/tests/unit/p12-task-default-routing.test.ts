@@ -226,3 +226,45 @@ describe('P13 fix — assistant-meta retrieval gate', () => {
     expect(shouldSkipRetrievalForSmalltalk('Who are the respondents in my tribunal case?')).toBe(false);
   });
 });
+
+describe('userForceModel — absolute Settings override', () => {
+  it('outranks task defaults, pins, and playbook preferences', () => {
+    const c = classifyTask('Write a function in typescript to sort arrays');
+    const d = decideRoute(baseInputs({
+      classification: c,
+      userForceModel: 'deepseek-coder-v2:16b',
+      pins: { coding: 'codestral:22b' },
+      preferredModels: ['qwen2.5-coder:32b'],
+      installedLocalModels: [HEAVY, 'deepseek-coder-v2:16b', 'codestral:22b', 'qwen2.5-coder:32b'],
+    }));
+    expect(d.model).toBe('deepseek-coder-v2:16b');
+    expect(d.pinUsed).toBe(true);
+    expect(d.reason).toContain('user override');
+  });
+
+  it('applies to light tasks too (no fast-lane bypass)', () => {
+    const c = classifyTask('thanks');
+    const d = decideRoute(baseInputs({
+      classification: c,
+      userForceModel: 'deepseek-coder-v2:16b',
+      installedLocalModels: [HEAVY, INSTANT, 'deepseek-coder-v2:16b'],
+    }));
+    expect(d.model).toBe('deepseek-coder-v2:16b');
+  });
+
+  it('falls through (with skip note) when the forced model is not installed under localOnly', () => {
+    const c = classifyTask('hello there');
+    const d = decideRoute(baseInputs({
+      classification: c,
+      userForceModel: 'not-a-real-model:1b',
+    }));
+    expect(d.model).not.toBe('not-a-real-model:1b');
+    expect(d.fallbackChain.some(f => f.skipped.includes('userForceModel'))).toBe(true);
+  });
+
+  it('null/empty override is a no-op', () => {
+    const c = classifyTask('thanks');
+    const d = decideRoute(baseInputs({ classification: c, userForceModel: null }));
+    if (c.confidence >= 0.6) expect(d.model).toBe(INSTANT);
+  });
+});

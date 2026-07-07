@@ -19,6 +19,11 @@
 import type { TaskClassification, TaskType } from './task-classifier.js';
 
 export interface RoutingInputs {
+  /** Absolute user override (Settings → Default Model). When set, EVERY
+   *  request uses this model — it outranks task pins, playbook bias,
+   *  task defaults, and provider promotion. Only an uninstalled model
+   *  (under localOnly) falls through, with the skip recorded. */
+  userForceModel?: string | null;
   classification: TaskClassification;
   defaultProvider: string;
   defaultModel: string;
@@ -147,6 +152,25 @@ function isDegradedByTelemetry(model: string, inputs: RoutingInputs): { degraded
 export function decideRoute(inputs: RoutingInputs): RoutingDecision {
   const fallbackChain: Array<{ model: string; skipped: string }> = [];
   const t = inputs.classification.primary;
+
+  // 0. Absolute user override — Settings → Default Model. The user asked
+  // for THIS model on every request; honour it above all heuristics.
+  const force = inputs.userForceModel;
+  if (force && force.trim().length > 0) {
+    if (inputs.localOnly && inputs.installedLocalModels.length > 0 && !inputs.installedLocalModels.includes(force)) {
+      fallbackChain.push({ model: force, skipped: `userForceModel: ${force} not installed locally` });
+    } else {
+      return {
+        model: force,
+        provider: inputs.defaultProvider,
+        reason: 'user override (Settings → Default Model) — task routing bypassed',
+        pinUsed: true,
+        fallbackChain,
+        taskType: t,
+        classificationConfidence: inputs.classification.confidence,
+      };
+    }
+  }
 
   // 1. Per-task pin
   const pinned = inputs.pins[t];
