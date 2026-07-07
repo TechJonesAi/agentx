@@ -2786,17 +2786,27 @@ function StatsTab() {
             <div>
               <div style={{ fontWeight: '600', color: 'var(--color-primary)' }}>Build Learning Memory</div>
               <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                {stats.enabled && stats.connected ? 'Active — connected and recording patterns' :
-                 stats.enabled && !stats.connected ? 'Enabled — waiting for DB connection' :
-                 'Disabled'}
+                {(() => {
+                  // A store that has recorded builds is, by definition,
+                  // connected — derive it so a missing/stale `connected`
+                  // field can never show a false 'waiting for DB'.
+                  const connected = stats.connected || (stats.recordedBuilds ?? 0) > 0;
+                  if (stats.enabled && connected) return 'Active — connected and recording patterns';
+                  if (stats.enabled) return 'Enabled — no builds recorded yet';
+                  return 'Disabled';
+                })()}
               </div>
             </div>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 'var(--spacing-md)' }}>
-            <StatCard label="Total Builds" value={stats.totalBuilds} color="var(--color-primary)" />
-            <StatCard label="Success Rate" value={`${stats.successRate}%`} color="#10b981" />
-            <StatCard label="Recorded Builds" value={stats.recordedBuilds} color="var(--color-primary)" />
+            <StatCard label="Total Builds" value={stats.totalBuilds ?? stats.recordedBuilds ?? 0} color="var(--color-primary)" />
+            <StatCard label="Success Rate" value={`${stats.successRate ?? (
+              (stats.recordedBuilds ?? 0) > 0
+                ? Math.round(((stats.successfulPatterns ?? 0) / (stats.recordedBuilds ?? 1)) * 100)
+                : 0
+            )}%`} color="#10b981" />
+            <StatCard label="Recorded Builds" value={stats.recordedBuilds ?? 0} color="var(--color-primary)" />
             <StatCard label="Success Patterns" value={stats.successfulPatterns} color="#8b5cf6" />
             <StatCard label="Failed Patterns" value={stats.failedPatterns} color="#ef4444" />
           </div>

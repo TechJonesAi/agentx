@@ -151,6 +151,12 @@ export class WebServer {
 
     // API routes
     if (url.startsWith('/api/')) {
+      // Never let the browser cache API responses. Without this, GETs like
+      // /api/build-memory/stats were served stale after a redeploy — the
+      // dashboard showed old numbers (and a false 'waiting for DB') while
+      // the server returned fresh data. Hashed static assets stay cacheable.
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
       await this.apiRouter.handle(method, url, req, res);
       return;
     }
