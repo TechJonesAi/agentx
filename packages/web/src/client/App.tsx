@@ -238,6 +238,20 @@ export function App() {
         setSystemHealth(health);
         runtimeStore.setSystemHealth(health);
 
+        // Stale-bundle detection: the server reports which client bundle it
+        // serves; if this tab is running an older one (open across a deploy
+        // or server restart), surface the existing update banner. This was
+        // the root cause of repeated "feature X is broken" reports.
+        try {
+          const serverBundle = (await res.clone().json() as { bundle?: string }).bundle;
+          const ownBundle = Array.from(document.querySelectorAll('script[src*="assets/main-"]'))
+            .map((el) => (el as HTMLScriptElement).src.split('/').pop())
+            .find(Boolean);
+          if (serverBundle && ownBundle && serverBundle !== 'unknown' && serverBundle !== ownBundle) {
+            setUpdateAvailable(true);
+          }
+        } catch { /* banner is best-effort */ }
+
         // Emit health event
         eventBus.emit('system.health_changed', {
           status: health,

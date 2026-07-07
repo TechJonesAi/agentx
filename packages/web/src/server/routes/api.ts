@@ -5,6 +5,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import type { Agent } from '@agentx/core';
 import { createLogger } from '@agentx/core';
 import { tryUnsupportedSpaShim, unknownEndpointEnvelope } from './spa-shims.js';
@@ -173,6 +174,20 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
     return ttsRouter;
   };
 
+  // Client bundle version (hashed asset filename) for stale-tab detection.
+  let bundleVersion: string | null = null;
+  const getBundleVersion = (): string => {
+    if (bundleVersion) return bundleVersion;
+    try {
+      const assetsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'client', 'assets');
+      const main = fs.readdirSync(assetsDir).find((f) => f.startsWith('main-') && f.endsWith('.js'));
+      bundleVersion = main ?? 'unknown';
+    } catch {
+      bundleVersion = 'unknown';
+    }
+    return bundleVersion;
+  };
+
   // Monetisation — monthly license keys, verified offline (ed25519).
   // Enforced ONLY when AGENTX_LICENSE_PUBLIC_KEY + AGENTX_LICENSE_REQUIRED
   // are both set on the install, so dev/owner instances stay open.
@@ -217,8 +232,13 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
 
       try {
         // ─── Health ──────────────────────────────────────────────────────
+        // `bundle` = the hashed filename of the client JS this server is
+        // serving. The client compares it with the script it's actually
+        // running and shows an "update available — refresh" banner on
+        // mismatch (stale-tab bundles caused repeated "X is broken" reports
+        // that were really just old JS talking to new APIs).
         if (route === '/api/health' && method === 'GET') {
-          sendJson(res, 200, { ok: true, timestamp: new Date().toISOString() });
+          sendJson(res, 200, { ok: true, timestamp: new Date().toISOString(), bundle: getBundleVersion() });
           return;
         }
 
