@@ -27,6 +27,14 @@ export function Header({ systemHealth, isDark, onThemeToggle }: HeaderProps) {
   // router's dynamic choice). Drives a small "FORCED" tag next to the
   // badge so it's obvious WHY the badge isn't moving after chats.
   const [isForced, setIsForced] = useState(false);
+  // Last ROUTED model/provider (what actually served the most recent
+  // request) — the configured default alone was misleading whenever the
+  // task router picked a different model or the oMLX fast lane.
+  const [routedModel, setRoutedModel] = useState<string | null>(null);
+  const [routedProvider, setRoutedProvider] = useState<string | null>(null);
+  const [routedTask, setRoutedTask] = useState<string | null>(null);
+  // oMLX fast-lane status light: 'up' | 'down' | 'unknown'.
+  const [omlxState, setOmlxState] = useState<'up' | 'down' | 'unknown'>('unknown');
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +61,29 @@ export function Header({ systemHealth, isDark, onThemeToggle }: HeaderProps) {
         });
         setActiveSessions(data.activeSessions || 0);
       } catch { /* transient — keep showing last good value */ }
+
+      // Live routing truth: which model/provider served the last request.
+      try {
+        const r = await fetch('/api/models/routing/history?limit=1');
+        if (r.ok) {
+          const d = await r.json();
+          const cur = d?.current;
+          if (!cancelled && cur?.model) {
+            setRoutedModel(cur.model);
+            setRoutedProvider(cur.provider ?? null);
+            setRoutedTask(cur.taskType ?? null);
+          }
+        }
+      } catch { /* keep last good value */ }
+
+      // oMLX fast-lane availability.
+      try {
+        const r = await fetch('/api/providers/omlx/status');
+        if (r.ok) {
+          const d = await r.json();
+          if (!cancelled) setOmlxState(d?.available ? 'up' : 'down');
+        } else if (!cancelled) setOmlxState('down');
+      } catch { if (!cancelled) setOmlxState('down'); }
     };
 
     // Refresh immediately on mount, then poll.
@@ -112,11 +143,42 @@ export function Header({ systemHealth, isDark, onThemeToggle }: HeaderProps) {
       <div className="header-right">
         <div
           className={`model-badge${modelFlash ? ' model-badge-flash' : ''}${isForced ? ' model-badge-forced' : ''}`}
-          title={isForced ? `${currentModel} (pinned from Settings → Default Model)` : currentModel}
+          title={
+            isForced
+              ? `${currentModel} (pinned from Settings → Default Model)`
+              : routedModel
+                ? `Last request: ${routedModel} via ${routedProvider ?? 'ollama'}${routedTask ? ` (task: ${routedTask})` : ''} — default: ${currentModel}`
+                : `Configured default: ${currentModel} — routing picks per task`
+          }
         >
           <span className="model-label">Model</span>
-          <code className="model-value">{currentModel}</code>
+          <code className="model-value">{routedModel ?? currentModel}</code>
+          {routedProvider === 'omlx' && (
+            <span className="model-forced-tag" style={{ background: '#238636', color: '#fff' }} title="Served by the oMLX (Apple MLX) fast lane">
+              ⚡ oMLX
+            </span>
+          )}
           {isForced && <span className="model-forced-tag" title="User override is active">FORCED</span>}
+        </div>
+
+        <div
+          className="sessions-badge"
+          title={
+            omlxState === 'up'
+              ? 'oMLX fast lane (Apple MLX, :8080) is running — light tasks are served 4-6× faster. Engaged automatically when benchmarks favour it.'
+              : omlxState === 'down'
+                ? 'oMLX fast lane is NOT running — all requests go through Ollama. The watchdog will restart it if installed.'
+                : 'Checking oMLX fast lane…'
+          }
+        >
+          <span
+            className="status-dot"
+            style={{
+              background: omlxState === 'up' ? '#3fb950' : omlxState === 'down' ? '#f85149' : '#6e7681',
+              width: 8, height: 8, borderRadius: '50%', display: 'inline-block',
+            }}
+          />
+          <span className="sessions-label">oMLX</span>
         </div>
 
         <div className="sessions-badge">
