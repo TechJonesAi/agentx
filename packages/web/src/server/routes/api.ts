@@ -799,7 +799,79 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         }
 
         if (route === '/api/cognitive/status' && method === 'GET') {
-          sendJson(res, 200, { running: false, jobs: [] });
+          // G6 — real status (was a hardcoded stub that told users to set an
+          // env var no code read). Cognitive runs are agent-loop + memory-api
+          // backed; enabled reflects what is actually available right now.
+          const loops = process.env['AGENTX_ENABLE_AGENT_LOOPS'] === 'true';
+          let memoryApi = false;
+          try {
+            const ctl = new AbortController();
+            const t = setTimeout(() => ctl.abort(), 1200);
+            const r = await fetch(`http://127.0.0.1:${process.env['AGENTX_MEMORY_API_PORT'] ?? 8100}/health`, { signal: ctl.signal });
+            clearTimeout(t);
+            memoryApi = r.ok;
+          } catch { /* down */ }
+          sendJson(res, 200, {
+            running: false,
+            enabled: loops || memoryApi,
+            engines: { agentLoops: loops, memoryApi },
+            jobs: [],
+          });
+          return;
+        }
+
+        // G6 — POST /api/cognitive/run: execute a research goal for real.
+        // Evidence comes from the memory-api reasoning engine (/answer:
+        // hybrid retrieval → rerank → relevance gate → cited answer, which
+        // ABSTAINS rather than hallucinate). Falls back to a plain agent
+        // completion when the memory-api is down.
+        if (route === '/api/cognitive/run' && method === 'POST') {
+          const body = await parseBody(req);
+          const goal = typeof body['goal'] === 'string' ? (body['goal'] as string).trim()
+            : typeof body['query'] === 'string' ? (body['query'] as string).trim() : '';
+          if (!goal) { sendJson(res, 400, { error: 'goal is required' }); return; }
+          const mode = typeof body['mode'] === 'string' ? (body['mode'] as string) : 'balanced';
+          const t0 = Date.now();
+          try {
+            let answer = '';
+            let evidence: unknown[] = [];
+            let synthesisSource: 'memory' | 'model' = 'model';
+            let gate: unknown = null;
+            try {
+              const ctl = new AbortController();
+              const t = setTimeout(() => ctl.abort(), 180_000);
+              const r = await fetch(`http://127.0.0.1:${process.env['AGENTX_MEMORY_API_PORT'] ?? 8100}/answer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: goal, limit: mode === 'deep' ? 20 : 10 }),
+                signal: ctl.signal,
+              });
+              clearTimeout(t);
+              if (r.ok) {
+                const d = await r.json() as { status?: string; answer?: string; evidence?: unknown[]; gate?: unknown };
+                if (d.status === 'answered' || d.status === 'abstained') {
+                  answer = d.answer ?? '';
+                  evidence = d.evidence ?? [];
+                  gate = d.gate ?? null;
+                  synthesisSource = 'memory';
+                }
+              }
+            } catch { /* memory-api down — fall through */ }
+            if (!answer) {
+              answer = await agent.chat(goal, `cognitive-${Date.now()}`);
+            }
+            sendJson(res, 200, {
+              status: 'complete',
+              goal,
+              mode,
+              reasoning: { synthesisSource, provider: synthesisSource === 'memory' ? 'deterministic' : 'ollama' },
+              outcome: { answer, evidence, gate, entities: [], claims: [], contradictions: [], events: [] },
+              loop_state: { iterations: 1, status: 'complete' },
+              stats: { latencyMs: Date.now() - t0, evidenceCount: evidence.length },
+            });
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
           return;
         }
 

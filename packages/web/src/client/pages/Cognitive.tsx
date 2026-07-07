@@ -437,7 +437,7 @@ export function Cognitive() {
       {/* Status chips — driven by real backend probe */}
       <div style={{ display: 'flex', gap: '10px', marginBottom: 'var(--spacing-lg)', flexWrap: 'wrap' }}>
         <span
-          title={status?.enabled ? 'Cognitive engine is enabled and ready.' : 'Cognitive engine is gated. Set AGENT_COGNITIVE_ENABLED=true and restart the server to enable.'}
+          title={status?.enabled ? 'Cognitive engine is enabled and ready.' : 'Cognitive engines offline — the memory-api reasoning engine and agent loops are both unavailable.'}
           style={{
             padding: '5px 14px', borderRadius: '20px', fontSize: '13px', fontWeight: 600,
             background: status?.enabled ? '#1b3a2d' : '#3a1b1b',
@@ -445,7 +445,7 @@ export function Cognitive() {
             cursor: 'help',
           }}
         >
-          Cognitive: {status?.enabled ? 'Enabled' : 'Unavailable — set AGENT_COGNITIVE_ENABLED=true'}
+          Cognitive: {status?.enabled ? 'Enabled (memory-api + agent loops)' : 'Unavailable — engines offline'}
         </span>
         <span
           title={status?.memoryGateway?.healthy ? 'Memory gateway is connected.' : 'The cognitive memory gateway is not wired. Note: the Memory tab itself (long-term memory + retrieval) works independently and is unaffected.'}
