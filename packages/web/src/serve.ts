@@ -30,6 +30,21 @@ async function main(): Promise<void> {
       'Memory API sidecar unavailable — continuing without it'),
   );
 
+  // G2 — Memory-API bridge: sync the document corpus into the reasoning
+  // engine and route document-grounded questions through its evidence-
+  // ranked retrieval (falls back to built-in retrieval on any failure).
+  const { startCorpusSync, queryMemoryApi } = await import('./server/memory-api-bridge.js');
+  startCorpusSync(() =>
+    (agent as unknown as { getDatabase?: () => { prepare(s: string): { all(...a: unknown[]): unknown[]; get(...a: unknown[]): unknown } } })
+      .getDatabase?.() ?? null,
+  );
+  (agent as unknown as { setDocRetrievalAugmenter?: (fn: (q: string) => Promise<string | null>) => void })
+    .setDocRetrievalAugmenter?.(async (query: string) => {
+      const res = await queryMemoryApi(query);
+      if (!res) return null;
+      return `\n\n[DOCUMENT EVIDENCE — reasoning engine, ${res.evidenceCount} sources]\n${res.contextText}\n(Answer ONLY from the evidence above; cite [Cn] markers. If the evidence is insufficient, say so.)`;
+    });
+
   // Auto-benchmark: refresh Ollama-vs-oMLX evidence every 6h so routing
   // promotions track real machine conditions instead of one stale run.
   const { startAutoBenchmark } = await import('./server/auto-benchmark.js');

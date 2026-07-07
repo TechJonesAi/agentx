@@ -1288,6 +1288,20 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
 
     this._decisionTrace.emit({ event: 'retrieval_started', query: input });
 
+    // G2 — Memory-API lane: document-grounded questions go through the
+    // reasoning engine (evidence-ranked, heading-pathed, cited context)
+    // when the bridge is wired and healthy. Any failure or empty result
+    // falls straight through to the built-in retrieval below.
+    if (this._docRetrievalAugmenter && classifyTask(input).primary === 'retrieval-grounded-qa') {
+      try {
+        const augmented = await this._docRetrievalAugmenter(input);
+        if (augmented && augmented.trim().length > 0) {
+          log.info({ query: input.slice(0, 60) }, 'G2: retrieval served by memory-api reasoning engine');
+          return augmented;
+        }
+      } catch { /* fall through to built-in retrieval */ }
+    }
+
     const start = Date.now();
     try {
       // R10: hard timeout — race against a timer so a stuck SQL call cannot
@@ -1504,6 +1518,15 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
    * construction (server boot) and then overridden by task routing, so
    * the Settings dropdown appeared to do nothing.
    */
+  /** G2 — pluggable document-retrieval augmenter. The web layer wires the
+   *  Memory API's reasoning engine (hybrid retrieval → rerank → cluster →
+   *  token-budgeted cited context) in here; core stays independent of it.
+   *  Return null to fall back to the built-in retrieval. */
+  private _docRetrievalAugmenter: ((query: string) => Promise<string | null>) | null = null;
+  setDocRetrievalAugmenter(fn: ((query: string) => Promise<string | null>) | null): void {
+    this._docRetrievalAugmenter = fn;
+  }
+
   private _forceModelCache: { mtimeMs: number; value: string | null } | null = null;
   private _getUserForceModel(): string | null {
     try {
