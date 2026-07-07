@@ -45,6 +45,13 @@ async function main(): Promise<void> {
       return `\n\n[DOCUMENT EVIDENCE — reasoning engine, ${res.evidenceCount} sources]\n${res.contextText}\n(Answer ONLY from the evidence above; cite [Cn] markers. If the evidence is insufficient, say so.)`;
     });
 
+  // G4 — proactive daily digest (first run 5min after boot, then 24h).
+  const { startDigest } = await import('./server/digest.js');
+  startDigest(() =>
+    (agent as unknown as { getDatabase?: () => { prepare(s: string): { get(...a: unknown[]): unknown; all(...a: unknown[]): unknown[] } } })
+      .getDatabase?.() ?? null,
+  );
+
   // Auto-benchmark: refresh Ollama-vs-oMLX evidence every 6h so routing
   // promotions track real machine conditions instead of one stale run.
   const { startAutoBenchmark } = await import('./server/auto-benchmark.js');

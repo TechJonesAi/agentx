@@ -11,6 +11,7 @@ import { createLogger } from '@agentx/core';
 import { tryUnsupportedSpaShim, unknownEndpointEnvelope } from './spa-shims.js';
 import { createTtsRouter, type TtsRouter } from '../tts/index.js';
 import { sttAvailable, transcribe } from '../stt.js';
+import { runDigest, latestDigests } from '../digest.js';
 import {
   listMemoryItems,
   getMemoryDetail,
@@ -250,6 +251,22 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
         // that were really just old JS talking to new APIs).
         if (route === '/api/health' && method === 'GET') {
           sendJson(res, 200, { ok: true, timestamp: new Date().toISOString(), bundle: getBundleVersion() });
+          return;
+        }
+
+        // ─── Proactive digest ─────────────────────────────────────────────
+        if (route === '/api/digest/latest' && method === 'GET') {
+          sendJson(res, 200, { digests: latestDigests() });
+          return;
+        }
+        if (route === '/api/digest/run' && method === 'POST') {
+          try {
+            const db = (agent as unknown as { getDatabase?: () => { prepare(s: string): { get(...a: unknown[]): unknown; all(...a: unknown[]): unknown[] } } }).getDatabase?.();
+            if (!db) { sendJson(res, 503, { error: 'db unavailable' }); return; }
+            sendJson(res, 200, runDigest(db));
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          }
           return;
         }
 
