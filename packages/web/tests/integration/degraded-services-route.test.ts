@@ -83,4 +83,26 @@ describe('GET /api/services/degraded', () => {
     expect(broken?.state).toBe('unavailable');
     expect(broken?.why).toContain('simulated outage');
   });
+
+  it('TTS Local Backend degraded flag AGREES with /api/tts/health (no contradiction)', async () => {
+    // Codex finding: /api/tts/health showed Piper OK while
+    // /api/services/degraded warned "no local backend". Both now read the
+    // same TTS router health, so they must never disagree — whatever the
+    // machine's real Piper state.
+    const router = createApiRouter(baseAgent() as never);
+    const degraded = await call(router, 'GET', '/api/services/degraded');
+    const health = await call(router, 'GET', '/api/tts/health');
+
+    const services = degraded.body['services'] as Array<{ name: string }>;
+    const ttsFlagged = services.some((s) => s.name === 'TTS Local Backend');
+
+    const providers = (health.body['providers'] ?? []) as Array<{ id: string; enabled?: boolean; ok?: boolean }>;
+    const localNeuralHealthy = providers.some(
+      (p) => (p.id === 'piper' || p.id === 'kokoro') && p.enabled && p.ok,
+    );
+
+    // If a local neural backend is healthy, it must NOT be flagged degraded,
+    // and vice-versa. The two surfaces are consistent.
+    expect(ttsFlagged).toBe(!localNeuralHealthy);
+  });
 });

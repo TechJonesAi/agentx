@@ -1580,18 +1580,26 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
             }
           } catch { /* */ }
 
-          // TTS local-mode status (honest — Qwen3 sidecar isn't a local
-          // executable yet on every platform).
+          // TTS local-mode status. Source of truth is the TTS router's live
+          // health — NOT the AGENTX_TTS_LOCAL_BACKEND env var. Piper is an
+          // auto-detecting provider (finds its binary + voice on disk with
+          // no env var), so gating on the env var contradicted
+          // /api/tts/health, which correctly showed Piper enabled. Only warn
+          // when NO fully-local provider (piper/kokoro) is actually healthy —
+          // i.e. synthesis really would fall to a network backend.
           try {
-            const localTts = process.env['AGENTX_TTS_LOCAL_BACKEND'];
-            if (!localTts || (localTts !== 'piper' && localTts !== 'kokoro')) {
+            const ttsHealth = await getTtsRouter().healthSummary();
+            const localNeural = (ttsHealth.providers ?? []).some(
+              (pr) => (pr.id === 'piper' || pr.id === 'kokoro') && pr.enabled && pr.ok,
+            );
+            if (!localNeural) {
               services.push({
                 name: 'TTS Local Backend',
                 state: 'degraded',
-                why: 'No native local TTS backend configured (piper / kokoro). The hosted Qwen3 endpoint or edge-tts may be used instead.',
+                why: 'No fully-local neural TTS backend is available (piper / kokoro). Synthesis may use the hosted Qwen3 endpoint or edge-tts.',
                 impact: 'Voice synthesis may emit network requests under localOnly mode.',
-                nextAction: 'Install Piper (https://github.com/rhasspy/piper) or Kokoro and set AGENTX_TTS_LOCAL_BACKEND=piper.',
-                recoveryPath: 'Restart server after setting the env var. localOnly mode will then be truthful for TTS.',
+                nextAction: 'Install Piper (pip install piper-tts) and place a voice model in ~/.agentx/voices, or set AGENTX_TTS_PIPER_BIN / a voice via AGENTX_TTS_PIPER_VOICE.',
+                recoveryPath: 'Once Piper resolves (binary + voice on disk), this entry clears automatically on next refresh.',
               });
             }
           } catch { /* */ }
@@ -4214,12 +4222,27 @@ export function createApiRouter(agent: Agent, options: ApiRouterOptions = {}): A
                 visionAvailable = (data.models ?? []).some((m) => m.name.includes('qwen3-vl'));
               }
             } catch { /* Ollama unreachable → vision unavailable */ }
+            // STT + TTS from the SAME sources as /api/stt/health and
+            // /api/tts/health, so the Chat sidebar badges can't contradict
+            // those endpoints (Codex finding: sidebar showed STT unavailable
+            // while /api/stt/health said available:true — the nested
+            // vision/stt/tts objects the sidebar reads simply weren't here).
+            const sttOk = sttAvailable();
+            let ttsOk = false;
+            try {
+              const th = await getTtsRouter().healthSummary();
+              ttsOk = (th.providers ?? []).some((pr) => pr.enabled && pr.ok);
+            } catch { /* tts router unavailable */ }
             sendJson(res, 200, {
               available: visionAvailable,
               overall: visionAvailable ? 'available' : 'unavailable',
               modalities: [
                 { modality: 'image', status: visionAvailable ? 'available' : 'unavailable', provider: visionModel },
               ],
+              // Nested per-modality objects the Chat sidebar consumes.
+              vision: { available: visionAvailable, model: visionModel },
+              stt: { available: sttOk, engine: 'mlx-whisper' },
+              tts: { available: ttsOk },
               visionModel,
               reason: visionAvailable ? undefined : 'qwen3-vl not installed or Ollama unreachable',
               voice: cfg.voice ?? null,

@@ -107,10 +107,11 @@ export function ChatSidebar(): React.JSX.Element {
           ...a,
           vision: j?.vision?.available ? 'available' : 'unavailable',
           stt: j?.stt?.available ? 'available' : 'unavailable',
+          tts: j?.tts?.available ? 'available' : 'unavailable',
         }));
       } catch {
         if (cancelled) return;
-        setAvailability((a) => ({ ...a, vision: 'unavailable', stt: 'unavailable' }));
+        setAvailability((a) => ({ ...a, vision: 'unavailable', stt: 'unavailable', tts: 'unavailable' }));
       }
     })();
 

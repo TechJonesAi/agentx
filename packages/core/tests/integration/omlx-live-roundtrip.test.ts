@@ -69,6 +69,9 @@ beforeEach(async () => {
 }, 30_000);
 
 afterEach(async () => {
+  // Force-close keep-alive sockets (Node fetch holds them open) so the
+  // close callback fires immediately instead of hanging the run.
+  server.closeAllConnections?.();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }, 30_000);
 

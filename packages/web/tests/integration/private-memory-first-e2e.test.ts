@@ -447,6 +447,9 @@ async function buildRig(): Promise<TestRig> {
 
 async function teardownRig(rig: TestRig): Promise<void> {
   rig.fetchRec.restore();
+  // Force-terminate keep-alive sockets so close() resolves deterministically
+  // (Node's fetch holds connections open; a bare close callback can hang).
+  rig.server.closeAllConnections?.();
   await new Promise<void>(r => rig.server.close(() => r()));
   // Best-effort agent shutdown.
   try {

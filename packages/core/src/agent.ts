@@ -1182,12 +1182,25 @@ export class Agent extends EventEmitter<AgentEvents> implements AgentInterface {
     monitor.registerProbe({
       name: 'Engine Integration',
       run: async () => {
-        const engineCtx = this._agentLoopEngine
-          ? (this._agentLoopEngine as unknown as { context?: { workflowRunStore?: unknown } }).context
-          : null;
+        // A not-yet-instantiated engine is the EXPECTED healthy idle state:
+        // the engine is built lazily on first use and ALWAYS wires the
+        // WorkflowRunStore by construction. Reporting 'degraded' here made
+        // the whole self-healing panel show DEGRADED while the header showed
+        // HEALTHY — a false contradiction. Verify the wiring DEPENDENCY is
+        // available instead of penalising lazy init; only report failed when
+        // the dependency genuinely can't be constructed.
         if (!this._agentLoopEngine) {
-          return { status: 'degraded', detail: 'AgentLoopEngine not yet instantiated (lazy)' };
+          try {
+            const store = this.getWorkflowRunStore();
+            if (!store) {
+              return { status: 'failed', detail: 'WorkflowRunStore unavailable — loops would not be durable' };
+            }
+            return { status: 'ok', detail: 'AgentLoopEngine lazy — WorkflowRunStore ready, wired on first use' };
+          } catch (e) {
+            return { status: 'failed', detail: `WorkflowRunStore init failed: ${e instanceof Error ? e.message : String(e)}` };
+          }
         }
+        const engineCtx = (this._agentLoopEngine as unknown as { context?: { workflowRunStore?: unknown } }).context;
         if (!engineCtx?.workflowRunStore) {
           return { status: 'failed', detail: 'AgentLoopEngine has no workflowRunStore — loops will not be durable' };
         }

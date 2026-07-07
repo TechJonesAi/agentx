@@ -145,6 +145,21 @@ describe('Multimodal UX polish', () => {
     expect(String(a['reason'])).toMatch(/install qwen3-vl|ollama pull/i);
   });
 
+  it('multimodal/status exposes nested vision/stt/tts objects the Chat sidebar reads', async () => {
+    // Codex finding: the sidebar read j.stt.available / j.vision.available /
+    // j.tts.available, but the endpoint only returned {available, modalities}
+    // — so the STT badge showed 'unavailable' while /api/stt/health said
+    // available:true. Assert the nested objects exist with boolean flags so
+    // the badges can never contradict the dedicated health endpoints.
+    const router = createApiRouter(fakeAgent() as never);
+    const r = await callGet(router, '/api/multimodal/status');
+    expect(r.status).toBe(200);
+    expect(typeof (r.body['stt'] as { available?: unknown })?.available).toBe('boolean');
+    expect(typeof (r.body['vision'] as { available?: unknown })?.available).toBe('boolean');
+    expect(typeof (r.body['tts'] as { available?: unknown })?.available).toBe('boolean');
+    expect((r.body['stt'] as { engine?: string })?.engine).toBe('mlx-whisper');
+  });
+
   it('PROVIDER_AUTH_MISSING is categorised with user-friendly message + 502', async () => {
     const router = createApiRouter(fakeAgent({ throwAuth: true }) as never);
     const r = await callMultipart(router, '/api/chat/multimodal', [

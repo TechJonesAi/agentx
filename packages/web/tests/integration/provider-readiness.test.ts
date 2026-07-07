@@ -93,7 +93,10 @@ function startFakeOllama(models: Array<{ name: string; size?: number }>): Promis
       const port = typeof addr === 'object' && addr ? addr.port : 0;
       resolve({
         url: `http://127.0.0.1:${port}`,
-        close: () => { try { server.close(); } catch { /* */ } },
+        // Force-terminate keep-alive sockets that Node's global fetch holds
+        // open, otherwise server.close() waits on them forever and the run
+        // never exits. closeAllConnections() makes teardown deterministic.
+        close: () => { try { server.closeAllConnections?.(); server.close(); } catch { /* */ } },
       });
     });
   });

@@ -73,7 +73,7 @@ function startMockOllama(jsonReply: Record<string, unknown>): Promise<MockProvid
         server,
         baseUrl: `http://127.0.0.1:${addr.port}`,
         calls,
-        close: () => new Promise((r) => server.close(() => r())),
+        close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }),
       });
     });
   });
@@ -105,7 +105,7 @@ function startMockOmlx(reply: string): Promise<MockProvider> {
         server,
         baseUrl: `http://127.0.0.1:${addr.port}`,
         calls,
-        close: () => new Promise((r) => server.close(() => r())),
+        close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }),
       });
     });
   });
