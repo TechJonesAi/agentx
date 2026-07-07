@@ -1,0 +1,53 @@
+#!/bin/bash
+# AgentX.app launcher stub — double-clickable entry point.
+#
+# Resolution order for the AgentX install directory:
+#   1. AGENTX_HOME env (power users)
+#   2. ~/.agentx/install-path (written by install.sh)
+#   3. Common locations (~/AgentX, ~/Projects/AgentX)
+#
+# The stub delegates everything (service startup, self-heal, dashboard
+# open) to packages/launcher/agentx-start.sh and shows a dialog on fatal
+# errors so a double-click never fails silently.
+
+set -uo pipefail
+
+resolve_home() {
+  if [[ -n "${AGENTX_HOME:-}" && -d "${AGENTX_HOME}" ]]; then
+    echo "${AGENTX_HOME}"; return 0
+  fi
+  if [[ -f "$HOME/.agentx/install-path" ]]; then
+    local p
+    p=$(cat "$HOME/.agentx/install-path" 2>/dev/null)
+    [[ -d "$p" ]] && { echo "$p"; return 0; }
+  fi
+  for p in "$HOME/AgentX" "$HOME/Projects/AgentX" "$HOME/agentx"; do
+    [[ -d "$p/packages/launcher" ]] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+fail_dialog() {
+  /usr/bin/osascript -e "display dialog \"$1\" with title \"AgentX\" buttons {\"OK\"} default button 1 with icon caution" >/dev/null 2>&1 || true
+  exit 1
+}
+
+AGENTX_ROOT=$(resolve_home) || fail_dialog "AgentX installation not found.
+
+Run the installer first, or set AGENTX_HOME to your AgentX folder."
+
+START="$AGENTX_ROOT/packages/launcher/agentx-start.sh"
+[[ -f "$START" ]] || fail_dialog "AgentX launcher script missing at:
+$START
+
+Reinstall AgentX to repair."
+
+LOG_DIR="$HOME/.agentx/logs"
+mkdir -p "$LOG_DIR"
+
+# Run the orchestrator; it opens the dashboard itself when healthy.
+/bin/bash "$START" >> "$LOG_DIR/app-launch.log" 2>&1 &
+
+# Give it a moment, then open the dashboard (idempotent if already open).
+sleep 2
+/usr/bin/open "http://127.0.0.1:${PORT:-3001}" >/dev/null 2>&1 || true
