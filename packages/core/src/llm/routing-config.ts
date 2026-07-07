@@ -74,9 +74,12 @@ export function validateRoutingConfig(input: unknown): RoutingConfigValidation {
   }
   const obj = input as Record<string, unknown>;
 
-  // mode (required)
+  // mode (optional — the POST handler merges partial updates into the
+  // existing config, so {forceModel: "…"} alone must be valid. Requiring
+  // mode here made every Settings "Default Model" pin fail with a 400.)
   const mode = obj['mode'];
-  if (typeof mode !== 'string' || !ALLOWED_MODES.includes(mode as RoutingMode)) {
+  if (mode !== undefined &&
+      (typeof mode !== 'string' || !ALLOWED_MODES.includes(mode as RoutingMode))) {
     errors.push(`mode must be one of: ${ALLOWED_MODES.join(', ')}`);
   }
 
@@ -131,9 +134,10 @@ export function validateRoutingConfig(input: unknown): RoutingConfigValidation {
 
   if (errors.length > 0) return { ok: false, errors };
 
-  const value: RoutingPolicyConfig = {
-    mode: mode as RoutingMode,
-  };
+  // Omit mode entirely when not supplied — a partial update spread over
+  // the existing config must not clobber the stored mode with undefined.
+  const value: RoutingPolicyConfig = {} as RoutingPolicyConfig;
+  if (mode !== undefined) value.mode = mode as RoutingMode;
   if (capabilityPins) value.capabilityPins = capabilityPins;
   if (forceModel !== undefined) value.forceModel = forceModel;
   if (maxLocalFailuresBeforeCloud !== undefined) value.maxLocalFailuresBeforeCloud = maxLocalFailuresBeforeCloud;

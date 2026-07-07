@@ -153,11 +153,15 @@ export function Settings() {
         const res = await fetch('/api/models/routing');
         if (!res.ok) return;
         const data = await res.json();
-        const models = (data.models ?? [])
-          .filter((m: any) => m.privacyLevel === 'local' && m.enabled !== false)
-          .map((m: any) => m.model as string);
+        // API shape: { policy: { mode, forceModel? }, availableModels: [{name, size}] }
+        // (the old data.models/privacyLevel shape no longer exists — the
+        // dropdown rendered empty and overrides were impossible to set).
+        const models = (data.availableModels ?? [])
+          .map((m: { name?: string }) => m.name)
+          .filter((n: string | undefined): n is string => !!n);
         setAvailableModels(models);
-        setForceModel(typeof data.forceModel === 'string' && data.forceModel.length > 0 ? data.forceModel : null);
+        const fm = data.policy?.forceModel;
+        setForceModel(typeof fm === 'string' && fm.length > 0 ? fm : null);
       } catch { /* non-critical */ }
     };
 
@@ -178,7 +182,8 @@ export function Settings() {
       });
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
-      setForceModel(typeof data.forceModel === 'string' && data.forceModel.length > 0 ? data.forceModel : null);
+      const savedFm = data.policy?.forceModel;
+      setForceModel(typeof savedFm === 'string' && savedFm.length > 0 ? savedFm : null);
       setSaveMessage(newValue ? `Default model set to ${newValue}. AgentX will use this for every request.` : 'Default model cleared — AgentX routing is back on Auto.');
       // Nudge the Header model-badge to re-poll. Not strictly needed (it
       // already polls every 5s) but makes the change feel instant.
